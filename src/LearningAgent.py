@@ -1,3 +1,8 @@
+from typing import Dict, List
+from Request import Request
+from Path import Path
+
+
 class LearningAgent(object):
     """
     A LearningAgent corresponds to a single decision making unit.
@@ -9,18 +14,16 @@ class LearningAgent(object):
     arbitration.
     """
 
-    def __init__(self, current_location, value_function):
-        super(LearningAgent, self).__init__()
-
+    def __init__(self, agent_id: int, initial_location: int):
         # Initialising the state of the agent
-        self.current_location = current_location
-        self.time_to_current_location = 0
+        self.id = agent_id
+        self.position = AgentLocation(initial_location)
+        self.path: Path = Path()
 
-        self.active_requests = []
-        self.current_path = []
 
-        # Loading the value function
-        self.value_function = value_function
+class AgentLocation(object):
+    """Define the current position of an Agent."""
 
-    def get_value(self, action):
-        pass
+    def __init__(self, next_location: int, time_to_next_location: float=0):
+        self.next_location = next_location
+        self.time_to_next_location = time_to_next_location

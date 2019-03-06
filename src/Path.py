@@ -99,15 +99,13 @@ class PathNode(object):
                  is_dropoff: bool,
                  relevant_request_id: int,
                  current_capacity: int=Path.NOT_APPLICABLE,
-                 expected_visit_time: float=Path.NOT_APPLICABLE,
-                 cumulative_remaining_delay: float=Path.NOT_APPLICABLE,
+                 expected_visit_time: float=Path.NOT_APPLICABLE
                  ):
 
         self.is_dropoff = is_dropoff
         self.relevant_request_id = relevant_request_id
         self.current_capacity = current_capacity
         self.expected_visit_time = expected_visit_time
-        self.cumulative_remaining_delay = cumulative_remaining_delay  # Not guaranteeed to be accurate
 
     def __str__(self):
         return "({}, {})".format(self.relevant_request_id, self.is_dropoff)

@@ -11,6 +11,8 @@ MAX_EPISODE_LENGTH = 1440
 
 def run(NUM_AGENTS=1000,
         EPISODE_LENGTH=MAX_EPISODE_LENGTH,
+        START_HOUR=0,
+        END_HOUR=9,
         IS_TRAINING=True):
 
     pdb.set_trace()
@@ -26,7 +28,7 @@ def run(NUM_AGENTS=1000,
 
     # Iterating over episode
     assert(EPISODE_LENGTH <= MAX_EPISODE_LENGTH)
-    request_generator = envt.get_request_batch()
+    request_generator = envt.get_request_batch(START_HOUR, END_HOUR)
 
     total_value_generated = 0
     num_total_requests = 0
@@ -70,7 +72,7 @@ def run(NUM_AGENTS=1000,
 
         # Simulate the passing of time
         print("Simulating motion till next epoch...")
-        envt.simulate_motion(agents)
+        envt.simulate_motion(agents, current_requests)
 
         # Printing statistics for current epoch
         num_total_requests += len(current_requests)

@@ -1,19 +1,27 @@
 from LearningAgent import LearningAgent
 from Action import Action
 from Request import Request
-from typing import Type, List, Generator
+from Path import PathNode, RequestInfo
+
+from typing import Type, List, Generator, Tuple
+
 from abc import ABCMeta, abstractmethod
+from random import choice
 from pandas import read_csv
-import pdb
+from collections import deque
+from docplex.mp.model import Model
 import re
 
 
 class Environment(metaclass=ABCMeta):
     """Defines a class for simulating the Environment for the RL agent"""
 
+    REQUEST_HISTORY_SIZE = 500
+
     def __init__(self):
         # Load environment
         self.initialise_environment()
+        self.recent_request_history: Deque[Request] = deque(maxlen=self.REQUEST_HISTORY_SIZE)
 
     @abstractmethod
     def initialise_environment(self):
@@ -39,31 +47,100 @@ class Environment(metaclass=ABCMeta):
     def get_epoch_length(self):
         raise NotImplementedError
 
-    def simulate_motion(self, agents: List[LearningAgent]) -> None:
+    def simulate_motion(self, agents: List[LearningAgent], current_requests: List[Request]) -> None:
+        # Move all agents
+        agents_to_rebalance: List[Tuple[LearningAgent, float]] = []
         for agent in agents:
             time_remaining: float = self.get_epoch_length()
+            time_remaining = self._move_agent(agent, time_remaining)
+            # If it has visited all the locations it needs to and has time left, rebalance
+            if (time_remaining > 0):
+                agents_to_rebalance.append((agent, time_remaining))
 
-            while(time_remaining >= 0):
-                time_remaining -= agent.position.time_to_next_location
+        # Update recent_requests list
+        self.update_recent_requests(current_requests)
 
-                # If we reach an intersection, make a decision about where to go next
-                if (time_remaining >= 0):
-                    # If the intersection is an existing pick-up or drop-off location, update the Agent's path
-                    if (agent.position.next_location == agent.path.get_next_location()):
-                        agent.path.visit_next_location()
+        # Perform Rebalancing
+        if (agents_to_rebalance):
+            rebalancing_targets = self._get_rebalance_targets([agent for agent, _ in agents_to_rebalance])
 
-                    # Go to the next location in the path, if it exists
-                    if (not agent.path.is_empty()):
-                        next_location = self.get_next_location(agent.position.next_location, agent.path.get_next_location())
-                        agent.position.time_to_next_location = self.get_travel_time(agent.position.next_location, next_location)
-                        agent.position.next_location = next_location
+            # Move cars according to the rebalancing_targets
+            for idx, target in enumerate(rebalancing_targets):
+                agent, time_remaining = agents_to_rebalance[idx]
 
-                    # TODO: Perform rebalancing if there is no next location
-                    else:
-                        break
-                # Else, continue down the road you're on
+                # Insert dummy target
+                agent.path.requests.append(RequestInfo(target, False))
+                agent.path.request_order.append(PathNode(False, 0))  # adds pickup location to 'to-visit' list
+
+                # Move according to dummy target
+                self._move_agent(agent, time_remaining)
+
+                # Delete dummy target
+                agent.path.request_order.clear()
+                agent.path.requests.clear()
+
+    def _move_agent(self, agent: LearningAgent, time_remaining: float) -> float:
+        while(time_remaining >= 0):
+            time_remaining -= agent.position.time_to_next_location
+
+            # If we reach an intersection, make a decision about where to go next
+            if (time_remaining >= 0):
+                # If the intersection is an existing pick-up or drop-off location, update the Agent's path
+                if (agent.position.next_location == agent.path.get_next_location()):
+                    agent.path.visit_next_location()
+
+                # Go to the next location in the path, if it exists
+                if (not agent.path.is_empty()):
+                    next_location = self.get_next_location(agent.position.next_location, agent.path.get_next_location())
+                    agent.position.time_to_next_location = self.get_travel_time(agent.position.next_location, next_location)
+                    agent.position.next_location = next_location
+
+                # If no additional locations need to be visited, stop
                 else:
-                    agent.position.time_to_next_location -= (time_remaining + agent.position.time_to_next_location)
+                    break
+            # Else, continue down the road you're on
+            else:
+                agent.position.time_to_next_location -= (time_remaining + agent.position.time_to_next_location)
+
+        return time_remaining
+
+    def _get_rebalance_targets(self, agents: List[LearningAgent]) -> List[Request]:
+        # Get a list of possible targets by sampling from recent_requests
+        possible_targets: List[Request] = []
+        for _ in range(len(agents)):
+            target = choice(self.recent_request_history)
+            possible_targets.append(target)
+
+        # Solve an LP to assign each agent to closest possible target
+        model = Model()
+
+        # Define variables, a matrix defining the assignment of agents to targets
+        assignments = model.binary_var_matrix(range(len(agents)), range(len(possible_targets)), name='assignments')
+
+        # Make sure one target can only be assigned to one agentfor m in matches
+        for agent_id in range(len(agents)):
+            model.add_constraint(model.sum(assignments[agent_id, target_id] for target_id in range(len(possible_targets))) == 1)
+
+        # Make sure one agent can only be assigned to one target
+        for target_id in range(len(possible_targets)):
+            model.add_constraint(model.sum(assignments[agent_id, target_id] for agent_id in range(len(agents))) == 1)
+
+        # Define the objective: Minimise distance travelled
+        model.minimize(model.sum(assignments[agent_id, target_id] * self.get_travel_time(agents[agent_id].position.next_location, possible_targets[target_id].pickup) for target_id in range(len(possible_targets)) for agent_id in range(len(agents))))
+
+        # Solve
+        solution = model.solve()
+        assert solution  # making sure that the model doesn't fail
+
+        # Get the assigned targets
+        assigned_targets: List[Request] = []
+        for agent_id in range(len(agents)):
+            for target_id in range(len(possible_targets)):
+                if (solution.get_value(assignments[agent_id, target_id]) == 1):
+                    assigned_targets.append(possible_targets[target_id])
+                    break
+
+        return assigned_targets
 
     def get_reward(self, action: Action) -> float:
         """
@@ -74,6 +151,9 @@ class Environment(metaclass=ABCMeta):
         convention in literature.
         """
         return sum([request.value for request in action.requests])
+
+    def update_recent_requests(self, recent_requests: List[Request]):
+        self.recent_request_history.extend(recent_requests)
 
 
 class NYEnvironment(Environment):
@@ -113,7 +193,11 @@ class NYEnvironment(Environment):
         self.initial_zones = read_csv(self.INITIALZONES_FILE,
                                       header=None).values.flatten()
 
-    def get_request_batch(self, day: int=2) -> Generator[List[Request], None, None]:
+    def get_request_batch(self,
+                          start_hour: int=0,
+                          end_hour: int=24,
+                          day: int=2) -> Generator[List[Request], None, None]:
+
         # Open file to read
         with open(self.DATA_FILE_PREFIX + str(day) + '.txt', 'r') as data_file:
             num_batches: int = int(data_file.readline().strip())
@@ -122,23 +206,24 @@ class NYEnvironment(Environment):
             new_epoch_re = re.compile(r'Flows:(\d+)-\d+')
             request_re = re.compile(r'(\d+),(\d+),(\d+)\.0')
 
-            # Parsing first 'new_epoch' line
-            new_epoch = re.match(new_epoch_re, data_file.readline().strip())
-            assert new_epoch is not None  # Make sure we got the formatting right
-            current_epoch = int(new_epoch.group(1))
-            self.current_time = current_epoch * self.EPOCH_LENGTH
-
             # Parsing rest of the file
             request_list: List[Request] = []
+            is_first_epoch = True
             for line in data_file.readlines():
                 line = line.strip()
 
                 is_new_epoch = re.match(new_epoch_re, line)
                 if (is_new_epoch is not None):
-                    yield request_list
-                    current_epoch = int(is_new_epoch.group(1))
-                    self.current_time = current_epoch * self.EPOCH_LENGTH
-                    request_list.clear()  # starting afresh for new batch
+                    if not is_first_epoch:
+                        current_hour = int(self.current_time / 3600)
+                        if (current_hour >= start_hour and current_hour < end_hour):
+                            yield request_list
+
+                        current_epoch = int(is_new_epoch.group(1))
+                        self.current_time = current_epoch * self.EPOCH_LENGTH
+                        request_list.clear()  # starting afresh for new batch
+                    else:
+                        is_first_epoch = False
                 else:
                     request_data = re.match(request_re, line)
                     assert request_data is not None  # Make sure there's nothing funky going on with the formatting
@@ -147,11 +232,12 @@ class NYEnvironment(Environment):
                     for _ in range(num_requests):
                         source = int(request_data.group(1))
                         destination = int(request_data.group(2))
-                        if (source not in self.ignored_zones and destination not in self.ignored_zones):
-                            travel_time = self.get_travel_time(source, destination)
-                            request_list.append(Request(source, destination, self.current_time, travel_time))
+                        if (source not in self.ignored_zones and destination not in self.ignored_zones and source != destination):
+                                travel_time = self.get_travel_time(source, destination)
+                                request_list.append(Request(source, destination, self.current_time, travel_time))
 
-            yield request_list
+            if (current_hour >= start_hour and current_hour < end_hour):
+                yield request_list
 
     def get_travel_time(self, source: int, destination: int) -> float:
         return self.travel_time[source, destination]

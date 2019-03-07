@@ -90,7 +90,7 @@ class Oracle(object):
 
         return trips
 
-    def get_new_path(self, agent: LearningAgent, current_path: Path, new_request: Request, SEARCH_THRESHOLD: int=2) -> Optional[Path]:
+    def get_new_path(self, agent: LearningAgent, current_path: Path, new_request: Request, SEARCH_THRESHOLD: int=4) -> Optional[Path]:
         # Create new Path variable to return
         new_path = deepcopy(current_path)
 

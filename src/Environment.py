@@ -162,7 +162,6 @@ class NYEnvironment(Environment):
     NUM_LOCATIONS: int = 4461
     NUM_MAX_AGENTS: int = 1000
 
-    MAX_CAPACITY: int = 10
     EPOCH_LENGTH: float = 60.0
 
     DATA_DIR: str = '../data/'
@@ -172,8 +171,9 @@ class NYEnvironment(Environment):
     IGNOREDZONES_FILE: str = DATA_DIR + 'ny/ignorezonelist.txt'
     DATA_FILE_PREFIX: str = DATA_DIR + 'ny/test_flow_5000_'
 
-    def __init__(self):
+    def __init__(self, MAX_CAPACITY: int=10):
         super().__init__()
+        self.MAX_CAPACITY = MAX_CAPACITY
 
     def initialise_environment(self):
         print('Loading Environment...')

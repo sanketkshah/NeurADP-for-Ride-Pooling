@@ -2,6 +2,7 @@ from Environment import NYEnvironment
 from CentralAgent import CentralAgent
 from LearningAgent import LearningAgent
 from Oracle import Oracle
+from ValueFunction import ImmediateReward
 
 import pdb
 
@@ -10,9 +11,8 @@ MAX_EPISODE_LENGTH = 1440
 
 
 def run(NUM_AGENTS=1000,
-        EPISODE_LENGTH=MAX_EPISODE_LENGTH,
         START_HOUR=0,
-        END_HOUR=9,
+        END_HOUR=24,
         IS_TRAINING=True):
 
     pdb.set_trace()
@@ -21,29 +21,32 @@ def run(NUM_AGENTS=1000,
     envt = NYEnvironment()
     oracle = Oracle(envt)
     central_agent = CentralAgent()
+    value_function = ImmediateReward()
     agents: List[LearningAgent] = []
     for agent_idx, initial_state in enumerate(envt.get_initial_state(NUM_AGENTS)):
         agent = LearningAgent(agent_idx, initial_state)
         agents.append(agent)
 
     # Iterating over episode
-    assert(EPISODE_LENGTH <= MAX_EPISODE_LENGTH)
     request_generator = envt.get_request_batch(START_HOUR, END_HOUR)
 
     total_value_generated = 0
     num_total_requests = 0
-    for _ in range(EPISODE_LENGTH):
+    while True:
         # Get new requests
-        current_requests = next(request_generator)
-        print("Current time: {}".format(envt.current_time))
-        print("Number of new requests: {}".format(len(current_requests)))
+        try:
+            current_requests = next(request_generator)
+            print("Current time: {}".format(envt.current_time))
+            print("Number of new requests: {}".format(len(current_requests)))
+        except StopIteration:
+            break
 
         # Get feasible actions and score them
         print("Generating feasible requests...")
         scored_actions_all_agents = []
         for agent_idx in range(NUM_AGENTS):
             feasible_actions = oracle.get_feasible_actions(agents[agent_idx], current_requests)
-            scored_actions = central_agent.get_value(agents[agent_idx], feasible_actions)
+            scored_actions = value_function.get_value(agents[agent_idx], feasible_actions)
             scored_actions_all_agents.append(scored_actions)
 
         # Choose actions for each agent
@@ -63,7 +66,7 @@ def run(NUM_AGENTS=1000,
         # Update value function
         if (IS_TRAINING):
             print("Updating value function...")
-            central_agent.update_value_function(rewards, agents, final_actions)
+            value_function.update(rewards, agents, final_actions)
 
         # Sanity check
         print("Sanity check...")

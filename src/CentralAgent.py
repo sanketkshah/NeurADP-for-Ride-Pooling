@@ -21,24 +21,7 @@ class CentralAgent(object):
     """
 
     def __init__(self):
-        self.__initialise_value_function()
-
-    def __initialise_value_function(self):
-        pass
-
-    def update_value_function(self, current_rewards, current_state, current_actions):
-        # TODO: Fill this in
-        # Perform update
-        # Save current rewards for use in next epoch
-        pass
-
-    def get_value(self, agent: LearningAgent, feasible_actions: List[Action]) -> List[Tuple[Action, float]]:
-        scored_actions: List[Tuple[Action, float]] = []
-        for action in feasible_actions:
-            score = len(action.requests)
-            scored_actions.append((action, score))
-
-        return scored_actions
+        super(CentralAgent, self).__init__()
 
     def choose_actions(self, agent_action_choices: List[List[Tuple[Action, float]]]) -> List[Action]:
         # Model as ILP

@@ -4,7 +4,7 @@ from LearningAgent import LearningAgent, AgentLocation
 from Path import Path, PathNode, RequestInfo
 from Environment import NYEnvironment
 
-from typing import List, Tuple, Optional, FrozenSet, Dict, Any
+from typing import List, Tuple, Optional, FrozenSet, Dict, Any, Set
 
 from copy import deepcopy
 from collections import namedtuple
@@ -90,7 +90,7 @@ class Oracle(object):
 
         return trips
 
-    def get_new_path(self, agent: LearningAgent, current_path: Path, new_request: Request, SEARCH_THRESHOLD: int=4) -> Optional[Path]:
+    def get_new_path(self, agent: LearningAgent, current_path: Path, new_request: Request, SEARCH_THRESHOLD: int=6) -> Optional[Path]:
         # Create new Path variable to return
         new_path = deepcopy(current_path)
 
@@ -130,8 +130,9 @@ class Oracle(object):
         stack: List[Tuple[List[PathNode], int, float]] = []
         current_request_order: List[PathNode] = []
 
-        while stack or (current_index < len(possible_next_nodes)):
+        while True:
             # Check if you can go deeper into the search space
+            stepBack = False
             if (current_index < len(possible_next_nodes)):
                 # Expand the current tree
                 next_node = possible_next_nodes[current_index]
@@ -153,12 +154,34 @@ class Oracle(object):
 
                 # If pick-up, check if it violates the current capacity
                 if (not next_node.is_dropoff and current_capacity + 1 > self.envt.MAX_CAPACITY):
-                    continue
+                    stepBack = True
 
                 # Check if it meets deadline
                 if (time_at_next_location > deadline):
-                    continue
+                    stepBack = True
 
+            # Else, check if this path has been completed
+            else:
+                if (path.is_complete(current_request_order)):
+                    # Check if this is the best path
+                    previous_lowest_delay = path.total_delay
+                    if (previous_lowest_delay == Path.NOT_APPLICABLE or current_remaining_delay > previous_lowest_delay):
+                        # Save, if it is
+                        path.request_order = deepcopy(current_request_order)
+                        path.total_delay = current_remaining_delay
+
+                stepBack = True
+
+            # If you can't go deeper, take a step back
+            if (stepBack):
+                if stack:
+                    possible_next_nodes, current_index, current_remaining_delay = stack.pop()
+                    current_request_order.pop()
+                else:
+                    break
+
+            # Else, go one step deeper
+            else:
                 # Add to the current path, given it is feasible
                 next_node.expected_visit_time = time_at_next_location
                 if (next_node.is_dropoff):
@@ -184,20 +207,6 @@ class Oracle(object):
                 current_index = 0
                 if (next_node.is_dropoff):
                     current_remaining_delay += (deadline - time_at_next_location)  # only dropoff delay is relevant
-
-            else:
-                # Check if this path has been completed
-                if (path.is_complete(current_request_order)):
-                    # Check if this is the best path
-                    previous_lowest_delay = path.total_delay
-                    if (previous_lowest_delay == Path.NOT_APPLICABLE or current_remaining_delay > previous_lowest_delay):
-                        # Save, if it is
-                        path.request_order = deepcopy(current_request_order)
-                        path.total_delay = current_remaining_delay
-
-                # Take a step back
-                possible_next_nodes, current_index, current_remaining_delay = stack.pop()
-                current_request_order.pop()
 
         return path
 
@@ -441,3 +450,6 @@ class Oracle(object):
             path.total_delay = max_total_delay
 
         return path
+
+    # def get_request_combinations(self, current_requests: List[Request]) -> Dict[Set[Request]]:
+    #     return

@@ -90,7 +90,7 @@ class Oracle(object):
 
         return trips
 
-    def get_new_path(self, agent: LearningAgent, current_path: Path, new_request: Request, SEARCH_THRESHOLD: int=6) -> Optional[Path]:
+    def get_new_path(self, agent: LearningAgent, current_path: Path, new_request: Request, SEARCH_THRESHOLD: int=-1) -> Optional[Path]:
         # Create new Path variable to return
         new_path = deepcopy(current_path)
 
@@ -107,7 +107,7 @@ class Oracle(object):
         # Heuristic Search: num_requests > threshold
         else:
             # Find best possible path formed by inserting new requests into the current path
-            new_path = self.get_path_insertion_2(agent, new_path)
+            new_path = self.get_new_path_insertion(agent, new_path)
 
         # Check if we found any valid paths
         if (new_path.is_complete()):

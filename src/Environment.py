@@ -3,7 +3,7 @@ from Action import Action
 from Request import Request
 from Path import PathNode, RequestInfo
 
-from typing import Type, List, Generator, Tuple
+from typing import Type, List, Generator, Tuple, Deque
 
 from abc import ABCMeta, abstractmethod
 from random import choice
@@ -16,12 +16,16 @@ import re
 class Environment(metaclass=ABCMeta):
     """Defines a class for simulating the Environment for the RL agent"""
 
-    REQUEST_HISTORY_SIZE = 500
+    REQUEST_HISTORY_SIZE: int = 500
 
-    def __init__(self):
+    def __init__(self, NUM_LOCATIONS: int, MAX_CAPACITY: int, EPOCH_LENGTH: float):
         # Load environment
-        self.initialise_environment()
+        self.NUM_LOCATIONS = NUM_LOCATIONS
+        self.MAX_CAPACITY = MAX_CAPACITY
+        self.EPOCH_LENGTH = EPOCH_LENGTH
+
         self.recent_request_history: Deque[Request] = deque(maxlen=self.REQUEST_HISTORY_SIZE)
+        self.current_time: float = 0.0
 
     @abstractmethod
     def initialise_environment(self):
@@ -43,15 +47,11 @@ class Environment(metaclass=ABCMeta):
     def get_initial_state(self, num_agents):
         raise NotImplementedError
 
-    @abstractmethod
-    def get_epoch_length(self):
-        raise NotImplementedError
-
     def simulate_motion(self, agents: List[LearningAgent], current_requests: List[Request]) -> None:
         # Move all agents
         agents_to_rebalance: List[Tuple[LearningAgent, float]] = []
         for agent in agents:
-            time_remaining: float = self.get_epoch_length()
+            time_remaining: float = self.EPOCH_LENGTH
             time_remaining = self._move_agent(agent, time_remaining)
             # If it has visited all the locations it needs to and has time left, rebalance
             if (time_remaining > 0):
@@ -159,10 +159,7 @@ class Environment(metaclass=ABCMeta):
 class NYEnvironment(Environment):
     """Define an Environment using the cleaned NYC Yellow Cab dataset."""
 
-    NUM_LOCATIONS: int = 4461
     NUM_MAX_AGENTS: int = 1000
-
-    EPOCH_LENGTH: float = 60.0
 
     DATA_DIR: str = '../data/'
     TRAVELTIME_FILE: str = DATA_DIR + 'ny/zone_traveltime.csv'
@@ -172,14 +169,11 @@ class NYEnvironment(Environment):
     DATA_FILE_PREFIX: str = DATA_DIR + 'ny/test_flow_5000_'
 
     def __init__(self, MAX_CAPACITY: int=10):
-        super().__init__()
-        self.MAX_CAPACITY = MAX_CAPACITY
+        super().__init__(NUM_LOCATIONS=4461, MAX_CAPACITY=MAX_CAPACITY, EPOCH_LENGTH=60.0)
+        self.initialise_environment()
 
     def initialise_environment(self):
         print('Loading Environment...')
-
-        # TODO: Make current_time something that all environments have
-        self.current_time: float = 0.0
 
         self.travel_time = read_csv(self.TRAVELTIME_FILE,
                                     header=None).values
@@ -249,9 +243,6 @@ class NYEnvironment(Environment):
         """Give initial states for num_agents agents"""
         assert (num_agents <= self.NUM_MAX_AGENTS)
         return self.initial_zones[:num_agents]
-
-    def get_epoch_length(self) -> float:
-        return self.EPOCH_LENGTH
 
     def has_valid_path(self, agent: LearningAgent) -> bool:
         """Attempt to check if the request order meets deadline and capacity constraints"""

@@ -5,6 +5,7 @@ from LearningAgent import LearningAgent
 from typing import List, Dict, Tuple, Set, Any
 
 from docplex.mp.model import Model
+from random import gauss
 
 
 # TODO: Factor out value function into a separate class
@@ -23,7 +24,7 @@ class CentralAgent(object):
     def __init__(self):
         super(CentralAgent, self).__init__()
 
-    def choose_actions(self, agent_action_choices: List[List[Tuple[Action, float]]]) -> List[Action]:
+    def choose_actions(self, agent_action_choices: List[List[Tuple[Action, float]]], is_training: bool=True, epoch_num: int=1) -> List[Action]:
         # Model as ILP
         model = Model()
 
@@ -80,7 +81,11 @@ class CentralAgent(object):
             model.add_constraint(model.sum(variable for action_dict in relevent_action_dicts for variable, _ in action_dict.values()) <= 1)
 
         # Create Objective
-        score = model.sum(value * variable for action_dict in decision_variables.values() for (variable, value) in action_dict.values())
+        # Add noise during training for exploration
+        def get_noise():
+            return gauss(0, 5 / (epoch_num + 1)) if is_training else 0
+
+        score = model.sum((value + get_noise()) * variable for action_dict in decision_variables.values() for (variable, value) in action_dict.values())
         model.maximize(score)
 
         # Solve ILP

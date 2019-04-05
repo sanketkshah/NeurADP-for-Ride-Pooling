@@ -14,6 +14,15 @@ class Path(object):
         self.total_delay = 0
         self.current_capacity = 0
 
+    def __repr__(self):
+        path_str = ""
+        for idx, node in enumerate(self.request_order):
+            location, _ = self.get_info(node)
+            path_str += str(location)
+            if idx < len(self.request_order) - 1:
+                path_str += " -> "
+        return path_str
+
     def get_next_location(self) -> int:
         if (self.is_empty()):
             return self.NOT_APPLICABLE
@@ -30,9 +39,12 @@ class Path(object):
         if not self.is_empty():
             next_node = self.request_order.pop(0)
             relevant_request_id = next_node.relevant_request_id
+
             # If dropoff node has been visited, remove the associated request
             if next_node.is_dropoff:
-                self.requests.pop(relevant_request_id)
+                next_request = self.requests.pop(relevant_request_id)
+                self.total_delay -= next_request.request.dropoff_deadline - next_node.expected_visit_time
+
                 # Update all the nodes in the request_order
                 for node in self.request_order:
                     if (node.relevant_request_id > relevant_request_id):

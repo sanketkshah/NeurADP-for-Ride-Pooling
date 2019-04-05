@@ -5,8 +5,6 @@ class Request(object):
     It represents a single customer's *request* for a ride
     """
 
-    # TODO: Define __str__ for the class
-
     MAX_PICKUP_DELAY: float = 300.0
     MAX_DROPOFF_DELAY: float = 600.0
 

@@ -11,6 +11,7 @@ from pandas import read_csv
 from collections import deque
 from docplex.mp.model import Model
 import re
+from random import randint
 
 
 class Environment(metaclass=ABCMeta):
@@ -18,11 +19,14 @@ class Environment(metaclass=ABCMeta):
 
     REQUEST_HISTORY_SIZE: int = 500
 
-    def __init__(self, NUM_LOCATIONS: int, MAX_CAPACITY: int, EPOCH_LENGTH: float):
+    def __init__(self, NUM_LOCATIONS: int, MAX_CAPACITY: int, EPOCH_LENGTH: float, NUM_AGENTS: int, START_EPOCH: float, STOP_EPOCH: float):
         # Load environment
         self.NUM_LOCATIONS = NUM_LOCATIONS
         self.MAX_CAPACITY = MAX_CAPACITY
         self.EPOCH_LENGTH = EPOCH_LENGTH
+        self.NUM_AGENTS = NUM_AGENTS
+        self.START_EPOCH = START_EPOCH
+        self.STOP_EPOCH = STOP_EPOCH
 
         self.recent_request_history: Deque[Request] = deque(maxlen=self.REQUEST_HISTORY_SIZE)
         self.current_time: float = 0.0
@@ -44,10 +48,10 @@ class Environment(metaclass=ABCMeta):
         raise NotImplementedError
 
     @abstractmethod
-    def get_initial_state(self, num_agents):
+    def get_initial_states(self, num_agents, is_training):
         raise NotImplementedError
 
-    def simulate_motion(self, agents: List[LearningAgent], current_requests: List[Request]) -> None:
+    def simulate_motion(self, agents: List[LearningAgent], current_requests: List[Request]=[], rebalance: bool=True) -> None:
         # Move all agents
         agents_to_rebalance: List[Tuple[LearningAgent, float]] = []
         for agent in agents:
@@ -61,7 +65,7 @@ class Environment(metaclass=ABCMeta):
         self.update_recent_requests(current_requests)
 
         # Perform Rebalancing
-        if (agents_to_rebalance):
+        if (rebalance and agents_to_rebalance):
             rebalancing_targets = self._get_rebalance_targets([agent for agent, _ in agents_to_rebalance])
 
             # Move cars according to the rebalancing_targets
@@ -160,6 +164,8 @@ class NYEnvironment(Environment):
     """Define an Environment using the cleaned NYC Yellow Cab dataset."""
 
     NUM_MAX_AGENTS: int = 1000
+    NUM_LOCATIONS: int = 4461
+    EPOCH_LENGTH: float = 60.0
 
     DATA_DIR: str = '../data/'
     TRAVELTIME_FILE: str = DATA_DIR + 'ny/zone_traveltime.csv'
@@ -168,8 +174,10 @@ class NYEnvironment(Environment):
     IGNOREDZONES_FILE: str = DATA_DIR + 'ny/ignorezonelist.txt'
     DATA_FILE_PREFIX: str = DATA_DIR + 'ny/test_flow_5000_'
 
-    def __init__(self, MAX_CAPACITY: int=10):
-        super().__init__(NUM_LOCATIONS=4461, MAX_CAPACITY=MAX_CAPACITY, EPOCH_LENGTH=60.0)
+    def __init__(self, NUM_AGENTS: int, START_EPOCH: float, STOP_EPOCH: float, MAX_CAPACITY: int=10):
+        assert NUM_AGENTS <= self.NUM_MAX_AGENTS
+        super().__init__(NUM_LOCATIONS=self.NUM_LOCATIONS, MAX_CAPACITY=MAX_CAPACITY, EPOCH_LENGTH=self.EPOCH_LENGTH, NUM_AGENTS=NUM_AGENTS, START_EPOCH=START_EPOCH, STOP_EPOCH=STOP_EPOCH)
+
         self.initialise_environment()
 
     def initialise_environment(self):
@@ -239,10 +247,26 @@ class NYEnvironment(Environment):
     def get_next_location(self, source: int, destination: int) -> int:
         return self.shortest_path[source, destination]
 
-    def get_initial_state(self, num_agents: int) -> List[int]:
+    def get_initial_states(self, num_agents: int, is_training: bool) -> List[int]:
         """Give initial states for num_agents agents"""
         assert (num_agents <= self.NUM_MAX_AGENTS)
-        return self.initial_zones[:num_agents]
+
+        # If it's training, get random states
+        if is_training:
+            initial_states = []
+
+            for _ in range(num_agents):
+                initial_state = randint(0, self.NUM_LOCATIONS - 1)
+                # Make sure it's not an ignored zone
+                while (initial_state in self.ignored_zones):
+                    initial_state = randint(0, self.NUM_LOCATIONS - 1)
+
+                initial_states.append(initial_state)
+        # Else, pick deterministic initial states
+        else:
+            initial_states = self.initial_zones[:num_agents]
+
+        return initial_states
 
     def has_valid_path(self, agent: LearningAgent) -> bool:
         """Attempt to check if the request order meets deadline and capacity constraints"""
@@ -297,5 +321,9 @@ class NYEnvironment(Environment):
                 node.current_capacity = next_capacity
             current_capacity = node.current_capacity
 
+        # Check total_delay
+        if (agent.path.total_delay != available_delay):
+            invalid_path_trace("(Ignored) Total delay incorrect.")
         agent.path.total_delay = available_delay
+
         return True

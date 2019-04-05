@@ -2,10 +2,11 @@ from Request import Request
 from Action import Action
 from LearningAgent import LearningAgent
 
-from typing import List, Dict, Tuple, Set, Any
+from typing import List, Dict, Tuple, Set, Any, Optional
 
 from docplex.mp.model import Model
-from random import gauss
+from docplex.mp.linear import Var
+from random import gauss, shuffle, randint
 
 
 # TODO: Factor out value function into a separate class
@@ -25,6 +26,10 @@ class CentralAgent(object):
         super(CentralAgent, self).__init__()
 
     def choose_actions(self, agent_action_choices: List[List[Tuple[Action, float]]], is_training: bool=True, epoch_num: int=1) -> List[Action]:
+        # TODO: Implement notion of a "random" action
+        return self.choose_actions_ILP(agent_action_choices, is_training, epoch_num)
+
+    def choose_actions_ILP(self, agent_action_choices: List[List[Tuple[Action, float]]], is_training: bool=True, epoch_num: int=1) -> List[Action]:
         # Model as ILP
         model = Model()
 
@@ -82,10 +87,11 @@ class CentralAgent(object):
 
         # Create Objective
         # Add noise during training for exploration
-        def get_noise():
-            return gauss(0, 5 / (epoch_num + 1)) if is_training else 0
+        def get_noise(variable: Var) -> float:
+            stdev = (4000 if 'x0,' in variable.get_name() else 2000) / (epoch_num + 1000)
+            return abs(gauss(0, stdev) if is_training else 0)
 
-        score = model.sum((value + get_noise()) * variable for action_dict in decision_variables.values() for (variable, value) in action_dict.values())
+        score = model.sum((value + get_noise(variable)) * variable for action_dict in decision_variables.values() for (variable, value) in action_dict.values())
         model.maximize(score)
 
         # Solve ILP
@@ -111,5 +117,36 @@ class CentralAgent(object):
 
             assert final_action is not None
             final_actions.append(final_action)
+
+        return final_actions
+
+    def _choose_actions_random(self, agent_action_choices: List[List[Tuple[Action, float]]], is_training: bool=True, epoch_num: int=1) -> List[Action]:
+        final_actions: List[Optional[Action]] = [None] * len(agent_action_choices)
+        consumed_requests: Set[Request] = set()
+
+        # Create a random ordering
+        order = list(range(len(agent_action_choices)))
+        shuffle(order)
+
+        # Pick agents in a random order
+        for agent_idx in order:
+            # Create a list of feasible actions
+            allowable_actions_idxs: List[int] = []
+            for action_idx, (action, _) in enumerate(agent_action_choices[agent_idx]):
+                is_not_consumed = [(request in consumed_requests) for request in action.requests]
+                if sum(is_not_consumed) == 0:
+                    allowable_actions_idxs.append(action_idx)
+
+            # Pick a random feasible action
+            final_action_idx = randint(0, len(allowable_actions_idxs) - 1)
+            final_action, _ = agent_action_choices[agent_idx][final_action_idx]
+            final_actions[agent_idx] = final_action
+
+            # Update inefasible action information
+            for request in final_action.requests:
+                consumed_requests.add(request)
+
+        for action in final_actions:
+            assert action is not None
 
         return final_actions

@@ -2,6 +2,7 @@ from LearningAgent import LearningAgent
 from Action import Action
 from Environment import Environment
 from Path import Path
+from ReplayBuffer import ExperienceReplay
 
 from typing import List, Tuple, Deque, Dict, Any, Iterable
 
@@ -9,7 +10,6 @@ from abc import ABC, abstractmethod
 from keras.layers import Input, LSTM, Dense, Embedding, TimeDistributed, Masking, Concatenate, Flatten, Bidirectional
 from keras.models import Model, load_model, clone_model
 from keras.backend import function as keras_function
-from random import sample
 from collections import deque
 import numpy as np
 from itertools import repeat
@@ -77,14 +77,14 @@ class NeuralNetworkBased(ValueFunction):
 
     TAU = 0.1
 
-    def __init__(self, envt: Environment, load_model_loc: str, GAMMA: float=0.9, BATCH_SIZE: int=256):
+    def __init__(self, envt: Environment, load_model_loc: str, GAMMA: float=0.9, BATCH_SIZE: int=128):
         super(NeuralNetworkBased, self).__init__()
 
         self.GAMMA = GAMMA
         self.BATCH_SIZE = BATCH_SIZE
         self.envt: Environment = envt
 
-        self.replay_buffer: Deque[Tuple[LearningAgent, List[Action], float, bool]] = deque(maxlen=1000 * envt.NUM_AGENTS)
+        self.replay_buffer = ExperienceReplay(MAX_LEN=1000 * envt.NUM_AGENTS)
 
         # Get NN Model
         if not load_model_loc:
@@ -203,13 +203,9 @@ class NeuralNetworkBased(ValueFunction):
 
         return scored_actions_all_agents
 
-    def _sample_buffer(self, num_samples: int) -> List[Tuple[LearningAgent, List[Action], float, bool]]:
-        # TODO: Prioritised experience replay
-        return sample(self.replay_buffer, num_samples)
-
     def remember(self, agents: List[LearningAgent], feasible_actions_all_agents: List[List[Action]], is_terminal: bool):
         for agent, feasible_actions in zip(agents, feasible_actions_all_agents):
-            self.replay_buffer.append((deepcopy(agent), feasible_actions, self.envt.current_time, is_terminal))
+            self.replay_buffer.add((deepcopy(agent), feasible_actions, self.envt.current_time, is_terminal))
 
     def update(self):
         # Check if replay buffer has enough samples for an update
@@ -218,7 +214,7 @@ class NeuralNetworkBased(ValueFunction):
             return
 
         # Sample from replay buffer
-        experiences = self._sample_buffer(num_samples)
+        experiences = self.replay_buffer.sample(num_samples)
 
         # Get the TD-Target for these experiences
         scored_actions_all_agents = self.get_value(*zip(*experiences), network=self.target_model)

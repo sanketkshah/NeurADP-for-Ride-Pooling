@@ -2,7 +2,7 @@ from LearningAgent import LearningAgent
 from Action import Action
 from Environment import Environment
 from Path import Path
-from ReplayBuffer import ExperienceReplay
+from ReplayBuffer import SimpleReplayBuffer, PrioritizedReplayBuffer
 
 from typing import List, Tuple, Deque, Dict, Any, Iterable
 
@@ -10,6 +10,8 @@ from abc import ABC, abstractmethod
 from keras.layers import Input, LSTM, Dense, Embedding, TimeDistributed, Masking, Concatenate, Flatten, Bidirectional
 from keras.models import Model, load_model, clone_model
 from keras.backend import function as keras_function
+from keras.callbacks import TensorBoard
+from keras.optimizers import Adam
 from collections import deque
 import numpy as np
 from itertools import repeat
@@ -75,16 +77,20 @@ class ImmediateReward(RewardPlusDelay):
 class NeuralNetworkBased(ValueFunction):
     """docstring for NeuralNetwork"""
 
-    TAU = 0.1
-
-    def __init__(self, envt: Environment, load_model_loc: str, GAMMA: float=0.9, BATCH_SIZE: int=128):
+    def __init__(self, envt: Environment, load_model_loc: str, GAMMA: float=0.9, BATCH_SIZE_FIT: int=64, BATCH_SIZE_PREDICT: int=4096, TARGET_UPDATE_TAU: float=0.1):
         super(NeuralNetworkBased, self).__init__()
 
+        # Initialise Constants
+        self.envt = envt
         self.GAMMA = GAMMA
-        self.BATCH_SIZE = BATCH_SIZE
-        self.envt: Environment = envt
+        self.BATCH_SIZE_FIT = BATCH_SIZE_FIT
+        self.BATCH_SIZE_PREDICT = BATCH_SIZE_PREDICT
+        self.TARGET_UPDATE_TAU = TARGET_UPDATE_TAU
 
-        self.replay_buffer = ExperienceReplay(MAX_LEN=1000 * envt.NUM_AGENTS)
+        self._epoch_id = 0
+
+        # Get Replay Buffer
+        self.replay_buffer = PrioritizedReplayBuffer(MAX_LEN=1000 * envt.NUM_AGENTS)
 
         # Get NN Model
         if not load_model_loc:
@@ -93,6 +99,7 @@ class NeuralNetworkBased(ValueFunction):
             self.model = load_model(load_model_loc)
 
         # Define Loss and Compile
+        # loss = Adam(lr=1e-7)
         self.model.compile(optimizer='adam', loss='mean_squared_error')
 
         # Get target-NN
@@ -101,13 +108,17 @@ class NeuralNetworkBased(ValueFunction):
         # Define soft-update function for target_model_update
         self.update_target_model = self._soft_update_function(self.target_model, self.model)
 
+        # Write logs
+        self.tensorboard = TensorBoard(log_dir='../logs/')
+        self.tensorboard.set_model(self.model)
+
     def _soft_update_function(self, target_model: Model, source_model: Model) -> keras_function:
         target_weights = target_model.trainable_weights
         source_weights = source_model.trainable_weights
 
         updates = []
-        for tw, sw in zip(target_weights, source_weights):
-            updates.append((tw, self.TAU * sw + (1. - self.TAU) * tw))
+        for target_weight, source_weight in zip(target_weights, source_weights):
+            updates.append((target_weight, self.TARGET_UPDATE_TAU * source_weight + (1. - self.TARGET_UPDATE_TAU) * target_weight))
 
         return keras_function([], [], updates=updates)
 
@@ -185,9 +196,9 @@ class NeuralNetworkBased(ValueFunction):
 
         # Score next states states
         if (network is None):
-            expected_future_values_all_agents = self.model.predict(action_inputs_all_agents, batch_size=self.BATCH_SIZE)
+            expected_future_values_all_agents = self.model.predict(action_inputs_all_agents, batch_size=self.BATCH_SIZE_PREDICT)
         else:
-            expected_future_values_all_agents = network.predict(action_inputs_all_agents, batch_size=self.BATCH_SIZE)
+            expected_future_values_all_agents = network.predict(action_inputs_all_agents, batch_size=self.BATCH_SIZE_PREDICT)
         expected_future_values_all_agents = self._reconstruct_NN_output(expected_future_values_all_agents, shape_info)
 
         def get_score(action: Action, value: float, is_terminal: bool):
@@ -214,7 +225,13 @@ class NeuralNetworkBased(ValueFunction):
             return
 
         # Sample from replay buffer
-        experiences = self.replay_buffer.sample(num_samples)
+        # TODO: Implement Beta Scheduler
+        if isinstance(self.replay_buffer, PrioritizedReplayBuffer):
+            beta = min(1, 0.4 + 0.6 * (self.envt.num_days_trained / 4000.0))
+            experiences, weights, batch_idxes = self.replay_buffer.sample(num_samples, beta)
+        else:
+            experiences = self.replay_buffer.sample(num_samples)
+            weights = None
 
         # Get the TD-Target for these experiences
         scored_actions_all_agents = self.get_value(*zip(*experiences), network=self.target_model)
@@ -224,10 +241,22 @@ class NeuralNetworkBased(ValueFunction):
         # Update NN based on TD-Target
         action_inputs_all_agents = self._format_inputs(*zip(*[([agent], current_time) for agent, _, current_time, _ in experiences]))
         action_inputs_all_agents, _ = self._flatten_NN_input(action_inputs_all_agents)
-        self.model.fit(action_inputs_all_agents, supervised_targets, batch_size=self.BATCH_SIZE)
+        history = self.model.fit(action_inputs_all_agents, supervised_targets, batch_size=self.BATCH_SIZE_FIT, sample_weight=weights)
+
+        # Write to logs
+        loss = history.history['loss'][0]
+        self.tensorboard.on_epoch_end(self._epoch_id, {'loss': loss})
+
+        # Update weights according to new losses in replay buffer
+        if isinstance(self.replay_buffer, PrioritizedReplayBuffer):
+            predicted_values = self.model.predict(action_inputs_all_agents, batch_size=self.BATCH_SIZE_PREDICT)
+            losses = (predicted_values - supervised_targets) ** 2 + 1e-6
+            self.replay_buffer.update_priorities(batch_idxes, losses.flatten())
 
         # Soft update target_model based on the learned model
         self.update_target_model([])
+
+        self._epoch_id += 1
 
 
 class PathBasedNN(NeuralNetworkBased):
@@ -239,7 +268,7 @@ class PathBasedNN(NeuralNetworkBased):
         # DEFINE NETWORK STRUCTURE
         # Get path and current locations' embeddings
         path_location_input = Input(shape=(self.envt.MAX_CAPACITY * 2 + 1,), dtype='int32', name='path_location_input')
-        location_embed = Embedding(output_dim=100, input_dim=self.envt.NUM_LOCATIONS + 1, mask_zero=True, name='location_embedding')
+        location_embed = Embedding(output_dim=10, input_dim=self.envt.NUM_LOCATIONS + 1, mask_zero=True, name='location_embedding')
         path_location_embed = location_embed(path_location_input)
 
         # Get associated delay for different path locations
@@ -248,7 +277,7 @@ class PathBasedNN(NeuralNetworkBased):
 
         # Get entire path's embedding
         path_input = Concatenate()([path_location_embed, delay_embed])
-        path_embed = Bidirectional(LSTM(300))(path_input)
+        path_embed = LSTM(300, go_backwards=True)(path_input)
 
         # Get current time's embedding
         current_time_input = Input(shape=(1,), name='current_time_input')
@@ -274,6 +303,7 @@ class PathBasedNN(NeuralNetworkBased):
 
         # Adding current location
         location_order[0] = agent.position.next_location + 1
+        delay_order[0] = 1
 
         for idx, node in enumerate(agent.path.request_order):
             if (idx >= 20):

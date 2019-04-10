@@ -28,6 +28,7 @@ class Environment(metaclass=ABCMeta):
         self.START_EPOCH = START_EPOCH
         self.STOP_EPOCH = STOP_EPOCH
 
+        self.num_days_trained = 0
         self.recent_request_history: Deque[Request] = deque(maxlen=self.REQUEST_HISTORY_SIZE)
         self.current_time: float = 0.0
 
@@ -119,7 +120,7 @@ class Environment(metaclass=ABCMeta):
         model = Model()
 
         # Define variables, a matrix defining the assignment of agents to targets
-        assignments = model.binary_var_matrix(range(len(agents)), range(len(possible_targets)), name='assignments')
+        assignments = model.continuous_var_matrix(range(len(agents)), range(len(possible_targets)), name='assignments')
 
         # Make sure one target can only be assigned to one agentfor m in matches
         for agent_id in range(len(agents)):

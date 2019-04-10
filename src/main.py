@@ -20,8 +20,7 @@ def run_epoch(envt,
               START_HOUR,
               END_HOUR,
               is_training,
-              epoch_idx: int=0,
-              TRAINING_FREQUENCY: int=10):
+              TRAINING_FREQUENCY: int=60):
 
     # Initialising agents
     agents: List[LearningAgent] = []
@@ -54,7 +53,7 @@ def run_epoch(envt,
         scored_actions_all_agents = value_function.get_value(agents, feasible_actions_all_agents, repeat(envt.current_time))
 
         # Choose actions for each agent
-        final_actions = central_agent.choose_actions(scored_actions_all_agents, is_training=is_training, epoch_num=epoch_idx)
+        final_actions = central_agent.choose_actions(scored_actions_all_agents, is_training=is_training, epoch_num=envt.num_days_trained)
 
         # Update
         if (is_training):
@@ -63,7 +62,7 @@ def run_epoch(envt,
             value_function.remember(agents, feasible_actions_all_agents, is_terminal)
 
             # Update value function every TRAINING_FREQUENCY timesteps
-            if (int(envt.current_time) % (int(envt.EPOCH_LENGTH) * TRAINING_FREQUENCY) == 0):
+            if ((int(envt.current_time) / int(envt.EPOCH_LENGTH)) % TRAINING_FREQUENCY == TRAINING_FREQUENCY - 1):
                 value_function.update()
 
         # Assign final actions to agents
@@ -116,7 +115,8 @@ if __name__ == '__main__':
     num_days_trained = 0
     for epoch_id in range(NUM_EPOCHS):
         for day in TRAINING_DAYS:
-            total_requests_served = run_epoch(envt, oracle, central_agent, value_function, NUM_AGENTS, day, START_HOUR, END_HOUR, epoch_idx=num_days_trained, is_training=True)
+            envt.num_days_trained = num_days_trained
+            total_requests_served = run_epoch(envt, oracle, central_agent, value_function, NUM_AGENTS, day, START_HOUR, END_HOUR, is_training=True)
             print("DAY: {}, Requests: {}".format(day, total_requests_served))
             num_days_trained += 1
 

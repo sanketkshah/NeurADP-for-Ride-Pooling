@@ -2,11 +2,11 @@ from Request import Request
 from Action import Action
 from LearningAgent import LearningAgent
 
-from typing import List, Dict, Tuple, Set, Any, Optional
+from typing import List, Dict, Tuple, Set, Any, Optional, Callable
 
 from docplex.mp.model import Model
 from docplex.mp.linear import Var
-from random import gauss, shuffle, randint
+from random import gauss, shuffle, randint, random
 
 
 # TODO: Factor out value function into a separate class
@@ -26,10 +26,31 @@ class CentralAgent(object):
         super(CentralAgent, self).__init__()
 
     def choose_actions(self, agent_action_choices: List[List[Tuple[Action, float]]], is_training: bool=True, epoch_num: int=1) -> List[Action]:
-        # TODO: Implement notion of a "random" action
-        return self.choose_actions_ILP(agent_action_choices, is_training, epoch_num)
+        return self._additive_gaussian(agent_action_choices, is_training, epoch_num)
 
-    def choose_actions_ILP(self, agent_action_choices: List[List[Tuple[Action, float]]], is_training: bool=True, epoch_num: int=1) -> List[Action]:
+    def _epsilon_greedy(self, agent_action_choices: List[List[Tuple[Action, float]]], is_training: bool=True, epoch_num: int=1) -> List[Action]:
+        # Decide whether or not to take random action
+        rand_num = random()
+        random_probability = 0.1 + max(0, 0.9 - 0.01 * epoch_num)
+
+        if not is_training or (rand_num > random_probability):
+            final_actions = self._choose_actions_ILP(agent_action_choices)
+        else:
+            final_actions = self._choose_actions_random(agent_action_choices)
+
+        return final_actions
+
+    def _additive_gaussian(self, agent_action_choices: List[List[Tuple[Action, float]]], is_training: bool=True, epoch_num: int=1) -> List[Action]:
+        # Define noise function for exploration
+        def get_noise(variable: Var) -> float:
+            stdev = (4000 if 'x0,' in variable.get_name() else 2000) / (epoch_num + 1000)
+            return abs(gauss(0, stdev)) if is_training else 0
+
+        final_actions = final_actions = self._choose_actions_ILP(agent_action_choices, get_noise=get_noise)
+
+        return final_actions
+
+    def _choose_actions_ILP(self, agent_action_choices: List[List[Tuple[Action, float]]], get_noise: Callable[[Var], float]=lambda x: 0) -> List[Action]:
         # Model as ILP
         model = Model()
 
@@ -86,11 +107,6 @@ class CentralAgent(object):
             model.add_constraint(model.sum(variable for action_dict in relevent_action_dicts for variable, _ in action_dict.values()) <= 1)
 
         # Create Objective
-        # Add noise during training for exploration
-        def get_noise(variable: Var) -> float:
-            stdev = (4000 if 'x0,' in variable.get_name() else 2000) / (epoch_num + 1000)
-            return abs(gauss(0, stdev) if is_training else 0)
-
         score = model.sum((value + get_noise(variable)) * variable for action_dict in decision_variables.values() for (variable, value) in action_dict.values())
         model.maximize(score)
 
@@ -120,7 +136,7 @@ class CentralAgent(object):
 
         return final_actions
 
-    def _choose_actions_random(self, agent_action_choices: List[List[Tuple[Action, float]]], is_training: bool=True, epoch_num: int=1) -> List[Action]:
+    def _choose_actions_random(self, agent_action_choices: List[List[Tuple[Action, float]]]) -> List[Action]:
         final_actions: List[Optional[Action]] = [None] * len(agent_action_choices)
         consumed_requests: Set[Request] = set()
 

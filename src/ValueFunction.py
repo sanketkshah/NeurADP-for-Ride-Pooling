@@ -90,7 +90,7 @@ class NeuralNetworkBased(ValueFunction):
         self._epoch_id = 0
 
         # Get Replay Buffer
-        self.replay_buffer = PrioritizedReplayBuffer(MAX_LEN=1000 * envt.NUM_AGENTS)
+        self.replay_buffer = PrioritizedReplayBuffer(MAX_LEN=10000 * envt.NUM_AGENTS)
 
         # Get NN Model
         if not load_model_loc:

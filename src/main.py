@@ -3,6 +3,7 @@ from CentralAgent import CentralAgent
 from LearningAgent import LearningAgent
 from Oracle import Oracle
 from ValueFunction import PathBasedNN, RewardPlusDelay, NeuralNetworkBased
+from Experience import Experience
 
 from typing import List
 
@@ -22,6 +23,8 @@ def run_epoch(envt,
               is_training,
               TRAINING_FREQUENCY: int=60):
 
+    # INITIALISATIONS
+    Experience.envt = envt
     # Initialising agents
     agents: List[LearningAgent] = []
     initial_states = envt.get_initial_states(NUM_AGENTS, is_training)
@@ -29,9 +32,8 @@ def run_epoch(envt,
         agent = LearningAgent(agent_idx, initial_state)
         agents.append(agent)
 
-    # Iterating over episode
+    # ITERATING OVER TIMESTEPS
     request_generator = envt.get_request_batch(START_HOUR, END_HOUR, DAY)
-
     total_value_generated = 0
     num_total_requests = 0
     while True:
@@ -51,10 +53,10 @@ def run_epoch(envt,
 
         # Score feasible actions
         is_terminal = ((END_HOUR * 3600) - envt.EPOCH_LENGTH) == envt.current_time
-        scored_actions_all_agents = value_function.get_value(agents, feasible_actions_all_agents, repeat(envt.current_time), repeat(is_terminal))
+        scored_actions_all_agents = value_function.get_value([Experience(agents, feasible_actions_all_agents, envt.current_time, is_terminal)])
 
         # Choose actions for each agent
-        final_actions = central_agent.choose_actions(scored_actions_all_agents, is_training=is_training, epoch_num=envt.num_days_trained)
+        scored_final_actions = central_agent.choose_actions(scored_actions_all_agents, is_training=is_training, epoch_num=envt.num_days_trained)
 
         # Update
         if (is_training):
@@ -66,12 +68,12 @@ def run_epoch(envt,
                 value_function.update(central_agent)
 
         # Assign final actions to agents
-        for agent_idx, (action, _) in enumerate(final_actions):
+        for agent_idx, (action, _) in enumerate(scored_final_actions):
             agents[agent_idx].path = deepcopy(action.new_path)
 
         # Calculate reward for selected actions
         rewards = []
-        for action, _ in final_actions:
+        for action, _ in scored_final_actions:
             reward = envt.get_reward(action)
             rewards.append(reward)
             total_value_generated += reward
@@ -94,10 +96,10 @@ def run_epoch(envt,
 
 
 if __name__ == '__main__':
-    # pdb.set_trace()
+    pdb.set_trace()
 
     # Constants
-    NUM_AGENTS: int = 1000
+    NUM_AGENTS: int = 10
     START_HOUR: int = 8
     END_HOUR: int = 9
     NUM_EPOCHS: int = 100
@@ -109,7 +111,7 @@ if __name__ == '__main__':
     envt = NYEnvironment(NUM_AGENTS, START_EPOCH=START_HOUR * 3600, STOP_EPOCH=END_HOUR * 3600)
     oracle = Oracle(envt)
     central_agent = CentralAgent()
-    value_function = PathBasedNN(envt, load_model_loc='../models/PathBasedNN_10agent_94_279.h5')
+    value_function = PathBasedNN(envt)
 
     max_test_score = 0
     num_days_trained = 0

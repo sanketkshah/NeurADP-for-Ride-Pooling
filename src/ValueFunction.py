@@ -5,6 +5,7 @@ from Path import Path
 from ReplayBuffer import SimpleReplayBuffer, PrioritizedReplayBuffer
 from Experience import Experience
 from CentralAgent import CentralAgent
+from Request import Request
 
 from typing import List, Tuple, Deque, Dict, Any, Iterable
 
@@ -27,7 +28,7 @@ class ValueFunction(ABC):
         super(ValueFunction, self).__init__()
 
     @abstractmethod
-    def get_value(self, agents: List[LearningAgent], feasible_actions_all_agents: List[List[Action]], current_times: List[float]) -> List[List[Tuple[Action, float]]]:
+    def get_value(self, experiences: List[Experience]) -> List[List[Tuple[Action, float]]]:
         raise NotImplementedError
 
     @abstractmethod
@@ -46,19 +47,20 @@ class RewardPlusDelay(ValueFunction):
         super(RewardPlusDelay, self).__init__()
         self.DELAY_COEFFICIENT = DELAY_COEFFICIENT
 
-    def get_value(self, agents: List[LearningAgent], feasible_actions_all_agents: List[List[Action]], current_times: List[float]) -> List[List[Tuple[Action, float]]]:
+    def get_value(self, experiences: List[Experience]) -> List[List[Tuple[Action, float]]]:
         scored_actions_all_agents: List[List[Tuple[Action, float]]] = []
-        for agent, feasible_actions, current_time in zip(agents, feasible_actions_all_agents, current_times):
-            scored_actions: List[Tuple[Action, float]] = []
-            for action in feasible_actions:
-                assert action.new_path
+        for experience in experiences:
+            for feasible_actions in experience.feasible_actions_all_agents:
+                scored_actions: List[Tuple[Action, float]] = []
+                for action in feasible_actions:
+                    assert action.new_path
 
-                immediate_reward = sum([request.value for request in action.requests])
-                remaining_delay_bonus = self.DELAY_COEFFICIENT * action.new_path.total_delay
-                score = immediate_reward + remaining_delay_bonus
+                    immediate_reward = sum([request.value for request in action.requests])
+                    remaining_delay_bonus = self.DELAY_COEFFICIENT * action.new_path.total_delay
+                    score = immediate_reward + remaining_delay_bonus
 
-                scored_actions.append((action, score))
-            scored_actions_all_agents.append(scored_actions)
+                    scored_actions.append((action, score))
+                scored_actions_all_agents.append(scored_actions)
 
         return scored_actions_all_agents
 
@@ -126,14 +128,13 @@ class NeuralNetworkBased(ValueFunction):
         raise NotImplementedError()
 
     @abstractmethod
-    def _format_inputs(self, agents: List[List[LearningAgent]], current_times: Iterable[float]):
+    def _format_input_batch(self, agents: List[List[LearningAgent]], current_time: float):
         raise NotImplementedError
 
-    def _format_inputs_next_state(self, agents: List[LearningAgent], feasible_actions_all_agents: List[List[Action]], current_times: Iterable[float]) -> Dict[str, np.ndarray]:
+    def _get_input_batch_next_state(self, agents: List[LearningAgent], feasible_actions_all_agents: List[List[Action]], current_time: float) -> Dict[str, np.ndarray]:
         # Move agents to next states
         all_agents_post_actions = []
-        next_times = []
-        for agent, feasible_actions, current_time in zip(agents, feasible_actions_all_agents, current_times):
+        for agent, feasible_actions in zip(agents, feasible_actions_all_agents):
             agents_post_actions = []
             for action in feasible_actions:
                 # Moving agent according to feasible action
@@ -145,10 +146,10 @@ class NeuralNetworkBased(ValueFunction):
                 agents_post_actions.append(agent_next_time)
             all_agents_post_actions.append(agents_post_actions)
 
-            next_times.append(current_time + self.envt.EPOCH_LENGTH)
+        next_time = current_time + self.envt.EPOCH_LENGTH
 
         # Return formatted inputs of these agents
-        return self._format_inputs(all_agents_post_actions, next_times)
+        return self._format_input_batch(all_agents_post_actions, next_time)
 
     def _flatten_NN_input(self, NN_input: Dict[str, np.ndarray]) -> Tuple[np.ndarray, List[int]]:
         for key, value in NN_input.items():
@@ -188,27 +189,47 @@ class NeuralNetworkBased(ValueFunction):
 
         return output_as_list
 
-    def get_value(self, agents: List[LearningAgent], feasible_actions_all_agents: List[List[Action]], current_times: Iterable[float], is_terminal: Iterable[bool]=repeat(False), network: Model=None) -> List[List[Tuple[Action, float]]]:
-        # Convert state to NN input format
-        action_inputs_all_agents = self._format_inputs_next_state(agents, feasible_actions_all_agents, current_times)
-        action_inputs_all_agents, shape_info = self._flatten_NN_input(action_inputs_all_agents)
+    def _format_experiences(self, experiences: List[Experience], is_current: bool) -> Tuple[Dict[str, np.ndarray], List[int]]:
+        action_inputs_all_agents = None
+        for experience in experiences:
+            if is_current:
+                batch_input = self._format_input_batch([[agent] for agent in experience.agents], experience.time)
+            else:
+                batch_input = self._get_input_batch_next_state(experience.agents, experience.feasible_actions_all_agents, experience.time)
 
-        # Score next states states
+            if action_inputs_all_agents is None:
+                action_inputs_all_agents = batch_input
+            else:
+                for key, value in batch_input.items():
+                    action_inputs_all_agents[key].extend(value)
+        assert action_inputs_all_agents is not None
+
+        return self._flatten_NN_input(action_inputs_all_agents)
+
+    def get_value(self, experiences: List[Experience], network: Model=None) -> List[List[Tuple[Action, float]]]:
+        # Format experiences
+        action_inputs_all_agents, shape_info = self._format_experiences(experiences, is_current=False)
+
+        # Score experiences
         if (network is None):
             expected_future_values_all_agents = self.model.predict(action_inputs_all_agents, batch_size=self.BATCH_SIZE_PREDICT)
         else:
             expected_future_values_all_agents = network.predict(action_inputs_all_agents, batch_size=self.BATCH_SIZE_PREDICT)
-        expected_future_values_all_agents = self._reconstruct_NN_output(expected_future_values_all_agents, shape_info)
-
-        def get_score(action: Action, value: float, is_terminal: bool):
-            score = self.envt.get_reward(action)
-            score += self.GAMMA * value if not is_terminal else 0
-            return score
 
         # Get Q-values by adding associated rewards
+        def get_score(action: Action, value: float, is_terminal: bool):
+            score = self.envt.get_reward(action)
+            score += (self.GAMMA * value) if not is_terminal else 0
+            return score
+
+        # Format output
+        expected_future_values_all_agents = self._reconstruct_NN_output(expected_future_values_all_agents, shape_info)
+        feasible_actions_all_agents = [feasible_actions for experience in experiences for feasible_actions in experience.feasible_actions_all_agents]
+        is_terminal_all_agents = [is_terminal for experience in experiences for is_terminal in repeat(experience.is_terminal, len(experience.agents))]
+
         scored_actions_all_agents: List[List[Tuple[Action, float]]] = []
-        for expected_future_values, feasible_actions in zip(expected_future_values_all_agents, feasible_actions_all_agents):
-            scored_actions = [(action, get_score(action, value, is_terminal)) for action, value, is_terminal in zip(feasible_actions, expected_future_values, is_terminal)]
+        for expected_future_values, feasible_actions, is_terminal in zip(expected_future_values_all_agents, feasible_actions_all_agents, is_terminal_all_agents):
+            scored_actions = [(action, get_score(action, value, is_terminal)) for action, value in zip(feasible_actions, expected_future_values)]
             scored_actions_all_agents.append(scored_actions)
 
         return scored_actions_all_agents
@@ -222,7 +243,7 @@ class NeuralNetworkBased(ValueFunction):
         if (num_samples > len(self.replay_buffer)):
             return
 
-        # Sample from replay buffer
+        # SAMPLE FROM REPLAY BUFFER
         # TODO: Implement Beta Scheduler
         if isinstance(self.replay_buffer, PrioritizedReplayBuffer):
             beta = min(1, 0.4 + 0.6 * (self.envt.num_days_trained / 4000.0))
@@ -230,26 +251,23 @@ class NeuralNetworkBased(ValueFunction):
         else:
             experiences = self.replay_buffer.sample(num_samples)
             weights = None
-
-        # Get the TD-Target for these experiences
         # Flatten experiences and associate weight of batch with every flattened experience
-        experiences_flattened = [(agent, feasible_actions, experience.time, experience.is_terminal)
-                                 for experience in experiences
-                                 for (agent, feasible_actions) in zip(experience.agents, experience.feasible_actions_all_agents)]
         if weights is not None:
             weights = np.array([weights] * self.envt.NUM_AGENTS).transpose().flatten()
-        # Score flattened experiences
-        scored_actions_all_agents = self.get_value(*zip(*experiences_flattened), network=self.target_model)  # type: ignore
+
+        # GET TD-TARGET
+        # Score experiences
+        scored_actions_all_agents = self.get_value(experiences, network=self.target_model)  # type: ignore
         # Run ILP on these experiences to get expected value at next time step
+        # TODO: Find better way to run the ILP
         value_next_state = []
         for idx in range(0, len(scored_actions_all_agents), self.envt.NUM_AGENTS):
             final_actions = central_agent.choose_actions(scored_actions_all_agents[idx:idx + self.envt.NUM_AGENTS], is_training=False)
             value_next_state.extend([score for _, score in final_actions])
         supervised_targets = np.array(value_next_state).reshape((-1, 1))
 
-        # Update NN based on TD-Target
-        action_inputs_all_agents = self._format_inputs(*zip(*[([agent], current_time) for agent, _, current_time, _ in experiences_flattened]))  # type: ignore
-        action_inputs_all_agents, _ = self._flatten_NN_input(action_inputs_all_agents)
+        # UPDATE NN BASED ON TD-TARGET
+        action_inputs_all_agents, _ = self._format_experiences(experiences, is_current=True)
         history = self.model.fit(action_inputs_all_agents, supervised_targets, batch_size=self.BATCH_SIZE_FIT, sample_weight=weights)
 
         # Write to logs
@@ -296,15 +314,19 @@ class PathBasedNN(NeuralNetworkBased):
         current_time_input = Input(shape=(1,), name='current_time_input')
         current_time_embed = Dense(100, activation='elu', name='time_embedding')(current_time_input)
 
+        # Get embedding for other
+        other_agents_input = Input(shape=(1,), name='other_agents_input')
+        other_agents_embed = Dense(100, activation='elu', name='other_agents_embed')(other_agents_input)
+
         # Get Embedding for the entire thing
-        state_embed = Concatenate()([path_embed, current_time_embed])
+        state_embed = Concatenate()([path_embed, current_time_embed, other_agents_embed])
         state_embed = Dense(300, activation='elu', name='state_embed_1')(state_embed)
         state_embed = Dense(300, activation='elu', name='state_embed_2')(state_embed)
 
         # Get predicted Value Function
         output = Dense(1, activation='relu', name='output')(state_embed)
 
-        model = Model(inputs=[path_location_input, delay_input, current_time_input], outputs=output)
+        model = Model(inputs=[path_location_input, delay_input, current_time_input, other_agents_input], outputs=output)
 
         return model
 
@@ -330,13 +352,28 @@ class PathBasedNN(NeuralNetworkBased):
 
         return location_order, delay_order, current_time_input
 
-    def _format_inputs(self, all_agents_post_actions: List[List[LearningAgent]], current_times: Iterable[float]):
-        input: Dict[str, List[Any]] = {"path_location_input": [], "delay_input": [], "current_time_input": []}
+    def _format_other_agents_input(self, agents: List[LearningAgent]) -> List[float]:
+        all_agents_other_agents_input = [0.0] * len(agents)
+        for agent_idx, agent in enumerate(agents):
+            for other_agent in agents:
+                if (self.envt.get_travel_time(agent.position.next_location, other_agent.position.next_location) < Request.MAX_PICKUP_DELAY):
+                    all_agents_other_agents_input[agent_idx] += 1
 
-        for agents_post_actions, current_time in zip(all_agents_post_actions, current_times):
+        return all_agents_other_agents_input
+
+    def _format_input_batch(self, all_agents_post_actions: List[List[LearningAgent]], current_time: float):
+        input: Dict[str, List[Any]] = {"path_location_input": [], "delay_input": [], "current_time_input": [], "other_agents_input": []}
+
+        # Format "other_agents_input"
+        # Assume first action is _null_ action
+        all_batches_other_agents_input = self._format_other_agents_input([agents_post_actions[0] for agents_post_actions in all_agents_post_actions])
+
+        # Format all the other inputs
+        for agents_post_actions, other_agents_batch_input in zip(all_agents_post_actions, all_batches_other_agents_input):
             current_time_input = []
             path_location_input = []
             delay_input = []
+            other_agents_input = []
             for agent in agents_post_actions:
                 # Get formatted output for the state
                 location_order, delay_order, current_time_agent = self._format_input(agent, current_time)
@@ -344,9 +381,11 @@ class PathBasedNN(NeuralNetworkBased):
                 current_time_input.append(current_time_agent)
                 path_location_input.append(location_order)
                 delay_input.append(delay_order)
+                other_agents_input.append(other_agents_batch_input)
 
             input["current_time_input"].append(current_time_input)
             input["delay_input"].append(delay_input)
             input["path_location_input"].append(path_location_input)
+            input["other_agents_input"].append(other_agents_input)
 
         return input

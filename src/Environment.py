@@ -11,7 +11,7 @@ from pandas import read_csv
 from collections import deque
 from docplex.mp.model import Model  # type: ignore
 import re
-from random import randint
+from random import randint, random
 
 
 class Environment(metaclass=ABCMeta):
@@ -19,7 +19,7 @@ class Environment(metaclass=ABCMeta):
 
     REQUEST_HISTORY_SIZE: int = 500
 
-    def __init__(self, NUM_LOCATIONS: int, MAX_CAPACITY: int, EPOCH_LENGTH: float, NUM_AGENTS: int, START_EPOCH: float, STOP_EPOCH: float):
+    def __init__(self, NUM_LOCATIONS: int, MAX_CAPACITY: int, EPOCH_LENGTH: float, NUM_AGENTS: int, START_EPOCH: float, STOP_EPOCH: floatget_):
         # Load environment
         self.NUM_LOCATIONS = NUM_LOCATIONS
         self.MAX_CAPACITY = MAX_CAPACITY
@@ -199,7 +199,10 @@ class NYEnvironment(Environment):
     def get_request_batch(self,
                           start_hour: int=0,
                           end_hour: int=24,
-                          day: int=2) -> Generator[List[Request], None, None]:
+                          day: int=2,
+                          downsample: float=1) -> Generator[List[Request], None, None]:
+
+        assert 0 < downsample <= 1
 
         # Open file to read
         with open(self.DATA_FILE_PREFIX + str(day) + '.txt', 'r') as data_file:
@@ -233,11 +236,14 @@ class NYEnvironment(Environment):
 
                     num_requests = int(request_data.group(3))
                     for _ in range(num_requests):
-                        source = int(request_data.group(1))
-                        destination = int(request_data.group(2))
-                        if (source not in self.ignored_zones and destination not in self.ignored_zones and source != destination):
-                                travel_time = self.get_travel_time(source, destination)
-                                request_list.append(Request(source, destination, self.current_time, travel_time))
+                        # Take request according to downsampled rate
+                        rand_num = random()
+                        if (rand_num <= downsample):
+                            source = int(request_data.group(1))
+                            destination = int(request_data.group(2))
+                            if (source not in self.ignored_zones and destination not in self.ignored_zones and source != destination):
+                                    travel_time = self.get_travel_time(source, destination)
+                                    request_list.append(Request(source, destination, self.current_time, travel_time))
 
             if (current_hour >= start_hour and current_hour < end_hour):
                 yield request_list

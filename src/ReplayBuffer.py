@@ -3,6 +3,7 @@
 
 from LearningAgent import LearningAgent
 from Action import Action
+from Experience import Experience
 from segment_tree import MinSegmentTree, SumSegmentTree
 
 from typing import Tuple, List
@@ -24,15 +25,14 @@ class ReplayBuffer(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    def add(self, experience: Tuple[LearningAgent, List[Action], float, bool]):
+    def add(self, experience: Experience):
         raise NotImplementedError
 
     @abstractmethod
-    def sample(self, num_experiences) -> List[Tuple[LearningAgent, List[Action], float, bool]]:
+    def sample(self, num_experiences: int):
         raise NotImplementedError
 
 
-# TODO: Factor out experiences into separate class
 class SimpleReplayBuffer(ReplayBuffer):
     def __init__(self, MAX_LEN: int, **kwargs):
         """Create Replay buffer.
@@ -45,24 +45,24 @@ class SimpleReplayBuffer(ReplayBuffer):
         """
         super(SimpleReplayBuffer, self).__init__(MAX_LEN)
 
-        self._storage: List[Tuple[LearningAgent, List[Action], float, bool]] = []
+        self._storage: List[Experience] = []
         self._maxsize: int = MAX_LEN
         self._next_idx: int = 0
 
     def __len__(self) -> int:
         return len(self._storage)
 
-    def add(self, experience: Tuple[LearningAgent, List[Action], float, bool]):
+    def add(self, experience: Experience):
         if self._next_idx >= len(self._storage):
             self._storage.append(experience)
         else:
             self._storage[self._next_idx] = experience
         self._next_idx = (self._next_idx + 1) % self._maxsize
 
-    def _encode_sample(self, idxes: List[int]) -> List[Tuple[LearningAgent, List[Action], float, bool]]:
+    def _encode_sample(self, idxes: List[int]) -> List[Experience]:
         return [self._storage[i] for i in idxes]
 
-    def sample(self, batch_size: int) -> List[Tuple[LearningAgent, List[Action], float, bool]]:
+    def sample(self, batch_size: int) -> List[Experience]:
         """Sample a batch of experiences.
 
         Parameters
@@ -107,16 +107,16 @@ class PrioritizedReplayBuffer(SimpleReplayBuffer):
 
         self._it_sum = SumSegmentTree(it_capacity)
         self._it_min = MinSegmentTree(it_capacity)
-        self._max_priority = 100.0
+        self._max_priority = 1.0
 
-    def add(self, *args, **kwargs):
+    def add(self, experience: Experience):
         """See SimpleReplayBuffer.store_effect"""
         idx = self._next_idx
-        super().add(*args, **kwargs)
+        super().add(experience)
         self._it_sum[idx] = self._max_priority ** self._alpha
         self._it_min[idx] = self._max_priority ** self._alpha
 
-    def _sample_proportional(self, batch_size):
+    def _sample_proportional(self, batch_size: int) -> List[int]:
         res = []
         p_total = self._it_sum.sum(0, len(self._storage) - 1)
         every_range_len = p_total / batch_size
@@ -126,7 +126,7 @@ class PrioritizedReplayBuffer(SimpleReplayBuffer):
             res.append(idx)
         return res
 
-    def sample(self, batch_size: int, beta: float=0.4):
+    def sample(self, batch_size: int, beta: float=0.4) -> Tuple[List[Experience], np.ndarray, List[int]]:  # type: ignore
         """Sample a batch of experiences.
 
         compared to SimpleReplayBuffer.sample

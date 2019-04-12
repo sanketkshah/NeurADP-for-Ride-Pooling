@@ -3,15 +3,17 @@ from Action import Action
 from Environment import Environment
 from Path import Path
 from ReplayBuffer import SimpleReplayBuffer, PrioritizedReplayBuffer
+from Experience import Experience
+from CentralAgent import CentralAgent
 
 from typing import List, Tuple, Deque, Dict, Any, Iterable
 
 from abc import ABC, abstractmethod
-from keras.layers import Input, LSTM, Dense, Embedding, TimeDistributed, Masking, Concatenate, Flatten, Bidirectional
-from keras.models import Model, load_model, clone_model
-from keras.backend import function as keras_function
-from keras.callbacks import TensorBoard
-from keras.optimizers import Adam
+from keras.layers import Input, LSTM, Dense, Embedding, TimeDistributed, Masking, Concatenate, Flatten, Bidirectional  # type: ignore
+from keras.models import Model, load_model, clone_model  # type: ignore
+from keras.backend import function as keras_function  # type: ignore
+from keras.callbacks import TensorBoard  # type: ignore
+from keras.optimizers import Adam  # type: ignore
 from collections import deque
 import numpy as np
 from itertools import repeat
@@ -29,7 +31,7 @@ class ValueFunction(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    def update(self):
+    def update(self, central_agent: CentralAgent):
         raise NotImplementedError
 
     @abstractmethod
@@ -90,20 +92,17 @@ class NeuralNetworkBased(ValueFunction):
         self._epoch_id = 0
 
         # Get Replay Buffer
-        self.replay_buffer = PrioritizedReplayBuffer(MAX_LEN=10000 * envt.NUM_AGENTS)
+        self.replay_buffer = PrioritizedReplayBuffer(MAX_LEN=10000)
 
         # Get NN Model
-        if not load_model_loc:
-            self.model = self._init_NN(self.envt.NUM_LOCATIONS)
-        else:
-            self.model = load_model(load_model_loc)
+        self.model: Model = load_model(load_model_loc) if load_model_loc else self._init_NN(self.envt.NUM_LOCATIONS)
 
         # Define Loss and Compile
-        # loss = Adam(lr=1e-7)
         self.model.compile(optimizer='adam', loss='mean_squared_error')
 
         # Get target-NN
         self.target_model = clone_model(self.model)
+        self.target_model.set_weights(self.model.get_weights())
 
         # Define soft-update function for target_model_update
         self.update_target_model = self._soft_update_function(self.target_model, self.model)
@@ -215,12 +214,11 @@ class NeuralNetworkBased(ValueFunction):
         return scored_actions_all_agents
 
     def remember(self, agents: List[LearningAgent], feasible_actions_all_agents: List[List[Action]], is_terminal: bool):
-        for agent, feasible_actions in zip(agents, feasible_actions_all_agents):
-            self.replay_buffer.add((deepcopy(agent), feasible_actions, self.envt.current_time, is_terminal))
+        self.replay_buffer.add(Experience(deepcopy(agents), feasible_actions_all_agents, self.envt.current_time, is_terminal))
 
-    def update(self):
+    def update(self, central_agent: CentralAgent):
         # Check if replay buffer has enough samples for an update
-        num_samples = 100 * self.envt.NUM_AGENTS
+        num_samples = 100
         if (num_samples > len(self.replay_buffer)):
             return
 
@@ -234,12 +232,23 @@ class NeuralNetworkBased(ValueFunction):
             weights = None
 
         # Get the TD-Target for these experiences
-        scored_actions_all_agents = self.get_value(*zip(*experiences), network=self.target_model)
-        value_next_state = [max(score for _, score in scored_actions) for scored_actions in scored_actions_all_agents]
+        # Flatten experiences and associate weight of batch with every flattened experience
+        experiences_flattened = [(agent, feasible_actions, experience.time, experience.is_terminal)
+                                 for experience in experiences
+                                 for (agent, feasible_actions) in zip(experience.agents, experience.feasible_actions_all_agents)]
+        if weights is not None:
+            weights = np.array([weights] * self.envt.NUM_AGENTS).transpose().flatten()
+        # Score flattened experiences
+        scored_actions_all_agents = self.get_value(*zip(*experiences_flattened), network=self.target_model)  # type: ignore
+        # Run ILP on these experiences to get expected value at next time step
+        value_next_state = []
+        for idx in range(0, len(scored_actions_all_agents), self.envt.NUM_AGENTS):
+            final_actions = central_agent.choose_actions(scored_actions_all_agents[idx:idx + self.envt.NUM_AGENTS], is_training=False)
+            value_next_state.extend([score for _, score in final_actions])
         supervised_targets = np.array(value_next_state).reshape((-1, 1))
 
         # Update NN based on TD-Target
-        action_inputs_all_agents = self._format_inputs(*zip(*[([agent], current_time) for agent, _, current_time, _ in experiences]))
+        action_inputs_all_agents = self._format_inputs(*zip(*[([agent], current_time) for agent, _, current_time, _ in experiences_flattened]))  # type: ignore
         action_inputs_all_agents, _ = self._flatten_NN_input(action_inputs_all_agents)
         history = self.model.fit(action_inputs_all_agents, supervised_targets, batch_size=self.BATCH_SIZE_FIT, sample_weight=weights)
 
@@ -247,11 +256,15 @@ class NeuralNetworkBased(ValueFunction):
         loss = history.history['loss'][0]
         self.tensorboard.on_epoch_end(self._epoch_id, {'loss': loss})
 
-        # Update weights according to new losses in replay buffer
+        # Update weights of replay buffer after update
         if isinstance(self.replay_buffer, PrioritizedReplayBuffer):
+            # Calculate new squared errors
             predicted_values = self.model.predict(action_inputs_all_agents, batch_size=self.BATCH_SIZE_PREDICT)
             losses = (predicted_values - supervised_targets) ** 2 + 1e-6
-            self.replay_buffer.update_priorities(batch_idxes, losses.flatten())
+            # Calculate error for overall experience
+            losses = losses.reshape((-1, self.envt.NUM_AGENTS)).mean(axis=1)
+            # Update priorities
+            self.replay_buffer.update_priorities(batch_idxes, losses)
 
         # Soft update target_model based on the learned model
         self.update_target_model([])

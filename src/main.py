@@ -50,7 +50,8 @@ def run_epoch(envt,
             feasible_actions_all_agents.append(feasible_actions)
 
         # Score feasible actions
-        scored_actions_all_agents = value_function.get_value(agents, feasible_actions_all_agents, repeat(envt.current_time))
+        is_terminal = ((END_HOUR * 3600) - envt.EPOCH_LENGTH) == envt.current_time
+        scored_actions_all_agents = value_function.get_value(agents, feasible_actions_all_agents, repeat(envt.current_time), repeat(is_terminal))
 
         # Choose actions for each agent
         final_actions = central_agent.choose_actions(scored_actions_all_agents, is_training=is_training, epoch_num=envt.num_days_trained)
@@ -58,20 +59,19 @@ def run_epoch(envt,
         # Update
         if (is_training):
             # Update replay buffer
-            is_terminal = ((END_HOUR * 3600) - envt.EPOCH_LENGTH) == envt.current_time
             value_function.remember(agents, feasible_actions_all_agents, is_terminal)
 
             # Update value function every TRAINING_FREQUENCY timesteps
             if ((int(envt.current_time) / int(envt.EPOCH_LENGTH)) % TRAINING_FREQUENCY == TRAINING_FREQUENCY - 1):
-                value_function.update()
+                value_function.update(central_agent)
 
         # Assign final actions to agents
-        for agent_idx, action in enumerate(final_actions):
+        for agent_idx, (action, _) in enumerate(final_actions):
             agents[agent_idx].path = deepcopy(action.new_path)
 
         # Calculate reward for selected actions
         rewards = []
-        for action in final_actions:
+        for action, _ in final_actions:
             reward = envt.get_reward(action)
             rewards.append(reward)
             total_value_generated += reward
@@ -97,7 +97,7 @@ if __name__ == '__main__':
     # pdb.set_trace()
 
     # Constants
-    NUM_AGENTS: int = 10
+    NUM_AGENTS: int = 1000
     START_HOUR: int = 8
     END_HOUR: int = 9
     NUM_EPOCHS: int = 100
@@ -109,7 +109,7 @@ if __name__ == '__main__':
     envt = NYEnvironment(NUM_AGENTS, START_EPOCH=START_HOUR * 3600, STOP_EPOCH=END_HOUR * 3600)
     oracle = Oracle(envt)
     central_agent = CentralAgent()
-    value_function = PathBasedNN(envt)
+    value_function = PathBasedNN(envt, load_model_loc='../models/PathBasedNN_10agent_94_279.h5')
 
     max_test_score = 0
     num_days_trained = 0
@@ -118,6 +118,7 @@ if __name__ == '__main__':
             envt.num_days_trained = num_days_trained
             total_requests_served = run_epoch(envt, oracle, central_agent, value_function, NUM_AGENTS, day, START_HOUR, END_HOUR, is_training=True)
             print("DAY: {}, Requests: {}".format(day, total_requests_served))
+            value_function.tensorboard.on_epoch_end(num_days_trained, {'requests_served': total_requests_served})
             num_days_trained += 1
 
         test_score = 0

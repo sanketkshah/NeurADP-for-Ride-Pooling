@@ -9,7 +9,7 @@ from abc import ABCMeta, abstractmethod
 from random import choice
 from pandas import read_csv
 from collections import deque
-from docplex.mp.model import Model
+from docplex.mp.model import Model  # type: ignore
 import re
 from random import randint
 

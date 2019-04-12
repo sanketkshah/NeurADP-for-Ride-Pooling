@@ -4,12 +4,11 @@ from LearningAgent import LearningAgent
 
 from typing import List, Dict, Tuple, Set, Any, Optional, Callable
 
-from docplex.mp.model import Model
-from docplex.mp.linear import Var
+from docplex.mp.model import Model  # type: ignore
+from docplex.mp.linear import Var  # type: ignore
 from random import gauss, shuffle, randint, random
 
 
-# TODO: Factor out value function into a separate class
 class CentralAgent(object):
     """
     A CentralAgent arbitrates between different Agents.
@@ -22,13 +21,14 @@ class CentralAgent(object):
     querying the rewards from the environment and the next state.
     """
 
-    def __init__(self):
+    def __init__(self, is_epsilon_greedy: bool=False):
         super(CentralAgent, self).__init__()
+        self._choose = self._epsilon_greedy if is_epsilon_greedy else self._additive_noise
 
-    def choose_actions(self, agent_action_choices: List[List[Tuple[Action, float]]], is_training: bool=True, epoch_num: int=1) -> List[Action]:
-        return self._additive_gaussian(agent_action_choices, is_training, epoch_num)
+    def choose_actions(self, agent_action_choices: List[List[Tuple[Action, float]]], is_training: bool=True, epoch_num: int=1) -> List[Tuple[Action, float]]:
+        return self._choose(agent_action_choices, is_training, epoch_num)
 
-    def _epsilon_greedy(self, agent_action_choices: List[List[Tuple[Action, float]]], is_training: bool=True, epoch_num: int=1) -> List[Action]:
+    def _epsilon_greedy(self, agent_action_choices: List[List[Tuple[Action, float]]], is_training: bool=True, epoch_num: int=1) -> List[Tuple[Action, float]]:
         # Decide whether or not to take random action
         rand_num = random()
         random_probability = 0.1 + max(0, 0.9 - 0.01 * epoch_num)
@@ -40,17 +40,17 @@ class CentralAgent(object):
 
         return final_actions
 
-    def _additive_gaussian(self, agent_action_choices: List[List[Tuple[Action, float]]], is_training: bool=True, epoch_num: int=1) -> List[Action]:
+    def _additive_noise(self, agent_action_choices: List[List[Tuple[Action, float]]], is_training: bool=True, epoch_num: int=1) -> List[Tuple[Action, float]]:
         # Define noise function for exploration
         def get_noise(variable: Var) -> float:
             stdev = (4000 if 'x0,' in variable.get_name() else 2000) / (epoch_num + 1000)
             return abs(gauss(0, stdev)) if is_training else 0
 
-        final_actions = final_actions = self._choose_actions_ILP(agent_action_choices, get_noise=get_noise)
+        final_actions = self._choose_actions_ILP(agent_action_choices, get_noise=get_noise)
 
         return final_actions
 
-    def _choose_actions_ILP(self, agent_action_choices: List[List[Tuple[Action, float]]], get_noise: Callable[[Var], float]=lambda x: 0) -> List[Action]:
+    def _choose_actions_ILP(self, agent_action_choices: List[List[Tuple[Action, float]]], get_noise: Callable[[Var], float]=lambda x: 0) -> List[Tuple[Action, float]]:
         # Model as ILP
         model = Model()
 
@@ -121,23 +121,23 @@ class CentralAgent(object):
                 if (solution.get_value(variable) == 1):
                     assigned_actions[agent_idx] = action_id
 
-        final_actions: List[Action] = []
+        final_actions: List[Tuple[Action, float]] = []
         for agent_idx in range(len(agent_action_choices)):
             assigned_action_id = assigned_actions[agent_idx]
             assigned_action = id_to_action[assigned_action_id]
-            final_action = None
-            for action, _ in agent_action_choices[agent_idx]:
+            scored_final_action = None
+            for action, score in agent_action_choices[agent_idx]:
                 if (action == assigned_action):
-                    final_action = action
+                    scored_final_action = (action, score)
                     break
 
-            assert final_action is not None
-            final_actions.append(final_action)
+            assert scored_final_action is not None
+            final_actions.append(scored_final_action)
 
         return final_actions
 
-    def _choose_actions_random(self, agent_action_choices: List[List[Tuple[Action, float]]]) -> List[Action]:
-        final_actions: List[Optional[Action]] = [None] * len(agent_action_choices)
+    def _choose_actions_random(self, agent_action_choices: List[List[Tuple[Action, float]]]) -> List[Tuple[Action, float]]:
+        final_actions: List[Optional[Tuple[Action, float]]] = [None] * len(agent_action_choices)
         consumed_requests: Set[Request] = set()
 
         # Create a random ordering
@@ -155,14 +155,14 @@ class CentralAgent(object):
 
             # Pick a random feasible action
             final_action_idx = randint(0, len(allowable_actions_idxs) - 1)
-            final_action, _ = agent_action_choices[agent_idx][final_action_idx]
-            final_actions[agent_idx] = final_action
+            final_action, score = agent_action_choices[agent_idx][final_action_idx]
+            final_actions[agent_idx] = (final_action, score)
 
             # Update inefasible action information
             for request in final_action.requests:
                 consumed_requests.add(request)
 
-        for action in final_actions:
+        for action in final_actions:  # type: ignore
             assert action is not None
 
-        return final_actions
+        return final_actions  # type: ignore

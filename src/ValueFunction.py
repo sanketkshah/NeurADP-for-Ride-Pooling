@@ -6,6 +6,7 @@ from ReplayBuffer import SimpleReplayBuffer, PrioritizedReplayBuffer
 from Experience import Experience
 from CentralAgent import CentralAgent
 from Request import Request
+from Experience import Experience
 
 from typing import List, Tuple, Deque, Dict, Any, Iterable
 
@@ -36,7 +37,7 @@ class ValueFunction(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    def remember(self, agents: List[LearningAgent], feasible_actions_all_agents: List[List[Action]], is_terminal: bool):
+    def remember(self, experience: Experience):
         raise NotImplementedError
 
 
@@ -81,7 +82,7 @@ class ImmediateReward(RewardPlusDelay):
 class NeuralNetworkBased(ValueFunction):
     """docstring for NeuralNetwork"""
 
-    def __init__(self, envt: Environment, load_model_loc: str, GAMMA: float=0.9, BATCH_SIZE_FIT: int=64, BATCH_SIZE_PREDICT: int=4096, TARGET_UPDATE_TAU: float=0.1):
+    def __init__(self, envt: Environment, load_model_loc: str, GAMMA: float=0.9, BATCH_SIZE_FIT: int=32, BATCH_SIZE_PREDICT: int=8192, TARGET_UPDATE_TAU: float=0.1):
         super(NeuralNetworkBased, self).__init__()
 
         # Initialise Constants
@@ -152,25 +153,19 @@ class NeuralNetworkBased(ValueFunction):
         return self._format_input_batch(all_agents_post_actions, next_time)
 
     def _flatten_NN_input(self, NN_input: Dict[str, np.ndarray]) -> Tuple[np.ndarray, List[int]]:
+        shape_info: List[int] = []
+
         for key, value in NN_input.items():
-            array_of_list = value
-
             # Remember the shape information of the inputs
-            shape_info = []
-            cumulative_sum = 0
-            for idx, list_el in enumerate(array_of_list):
-                list_el = np.array(list_el)
-                array_of_list[idx] = list_el
-
+            if not shape_info:
+                cumulative_sum = 0
                 shape_info.append(cumulative_sum)
-                cumulative_sum += list_el.shape[0]
-            shape_info.append(cumulative_sum)
+                for idx, list_el in enumerate(value):
+                    cumulative_sum += len(list_el)
+                    shape_info.append(cumulative_sum)
 
             # Reshape
-            if (len(list_el.shape) > 1):
-                NN_input[key] = np.vstack(array_of_list)
-            else:
-                NN_input[key] = np.hstack(array_of_list)
+            NN_input[key] = np.array([element for array in value for element in array])
 
         return NN_input, shape_info
 
@@ -192,10 +187,14 @@ class NeuralNetworkBased(ValueFunction):
     def _format_experiences(self, experiences: List[Experience], is_current: bool) -> Tuple[Dict[str, np.ndarray], List[int]]:
         action_inputs_all_agents = None
         for experience in experiences:
+            # If experience hasn't been formatted, format it
+            if not (self.__class__.__name__ in experience.representation):
+                experience.representation[self.__class__.__name__] = self._get_input_batch_next_state(experience.agents, experience.feasible_actions_all_agents, experience.time)
+
             if is_current:
                 batch_input = self._format_input_batch([[agent] for agent in experience.agents], experience.time)
             else:
-                batch_input = self._get_input_batch_next_state(experience.agents, experience.feasible_actions_all_agents, experience.time)
+                batch_input = deepcopy(experience.representation[self.__class__.__name__])
 
             if action_inputs_all_agents is None:
                 action_inputs_all_agents = batch_input
@@ -234,60 +233,61 @@ class NeuralNetworkBased(ValueFunction):
 
         return scored_actions_all_agents
 
-    def remember(self, agents: List[LearningAgent], feasible_actions_all_agents: List[List[Action]], is_terminal: bool):
-        self.replay_buffer.add(Experience(deepcopy(agents), feasible_actions_all_agents, self.envt.current_time, is_terminal))
+    def remember(self, experience: Experience):
+        self.replay_buffer.add(experience)
 
     def update(self, central_agent: CentralAgent):
         # Check if replay buffer has enough samples for an update
-        num_samples = 100
+        num_samples = 30
         if (num_samples > len(self.replay_buffer)):
             return
 
         # SAMPLE FROM REPLAY BUFFER
         # TODO: Implement Beta Scheduler
         if isinstance(self.replay_buffer, PrioritizedReplayBuffer):
-            beta = min(1, 0.4 + 0.6 * (self.envt.num_days_trained / 4000.0))
+            beta = min(1, 0.4 + 0.6 * (self.envt.num_days_trained / 200.0))
             experiences, weights, batch_idxes = self.replay_buffer.sample(num_samples, beta)
         else:
             experiences = self.replay_buffer.sample(num_samples)
             weights = None
-        # Flatten experiences and associate weight of batch with every flattened experience
-        if weights is not None:
-            weights = np.array([weights] * self.envt.NUM_AGENTS).transpose().flatten()
 
-        # GET TD-TARGET
-        # Score experiences
-        scored_actions_all_agents = self.get_value(experiences, network=self.target_model)  # type: ignore
-        # Run ILP on these experiences to get expected value at next time step
-        # TODO: Find better way to run the ILP
-        value_next_state = []
-        for idx in range(0, len(scored_actions_all_agents), self.envt.NUM_AGENTS):
-            final_actions = central_agent.choose_actions(scored_actions_all_agents[idx:idx + self.envt.NUM_AGENTS], is_training=False)
-            value_next_state.extend([score for _, score in final_actions])
-        supervised_targets = np.array(value_next_state).reshape((-1, 1))
+        # ITERATIVELY UPDATE POLICY BASED ON SAMPLE
+        for experience_idx, (experience, batch_idx) in enumerate(zip(experiences, batch_idxes)):
+            # Flatten experiences and associate weight of batch with every flattened experience
+            if weights is not None:
+                weights = np.array([weights[experience_idx]] * self.envt.NUM_AGENTS)
 
-        # UPDATE NN BASED ON TD-TARGET
-        action_inputs_all_agents, _ = self._format_experiences(experiences, is_current=True)
-        history = self.model.fit(action_inputs_all_agents, supervised_targets, batch_size=self.BATCH_SIZE_FIT, sample_weight=weights)
+            # GET TD-TARGET
+            # Score experiences
+            scored_actions_all_agents = self.get_value([experience], network=self.target_model)  # type: ignore
 
-        # Write to logs
-        loss = history.history['loss'][0]
-        self.tensorboard.on_epoch_end(self._epoch_id, {'loss': loss})
+            # Run ILP on these experiences to get expected value at next time step
+            value_next_state = []
+            for idx in range(0, len(scored_actions_all_agents), self.envt.NUM_AGENTS):
+                final_actions = central_agent.choose_actions(scored_actions_all_agents[idx:idx + self.envt.NUM_AGENTS], is_training=False)
+                value_next_state.extend([score for _, score in final_actions])
+            supervised_targets = np.array(value_next_state).reshape((-1, 1))
 
-        # Update weights of replay buffer after update
-        if isinstance(self.replay_buffer, PrioritizedReplayBuffer):
-            # Calculate new squared errors
-            predicted_values = self.model.predict(action_inputs_all_agents, batch_size=self.BATCH_SIZE_PREDICT)
-            losses = (predicted_values - supervised_targets) ** 2 + 1e-6
-            # Calculate error for overall experience
-            losses = losses.reshape((-1, self.envt.NUM_AGENTS)).mean(axis=1)
-            # Update priorities
-            self.replay_buffer.update_priorities(batch_idxes, losses)
+            # UPDATE NN BASED ON TD-TARGET
+            action_inputs_all_agents, _ = self._format_experiences([experience], is_current=True)
+            history = self.model.fit(action_inputs_all_agents, supervised_targets, batch_size=self.BATCH_SIZE_FIT, sample_weight=weights)
 
-        # Soft update target_model based on the learned model
-        self.update_target_model([])
+            # Write to logs
+            loss = history.history['loss'][-1]
+            self.tensorboard.on_epoch_end(self._epoch_id, {'loss': loss})
 
-        self._epoch_id += 1
+            # Update weights of replay buffer after update
+            if isinstance(self.replay_buffer, PrioritizedReplayBuffer):
+                # Calculate new squared errors
+                predicted_values = self.model.predict(action_inputs_all_agents, batch_size=self.BATCH_SIZE_PREDICT)
+                loss = np.mean((predicted_values - supervised_targets) ** 2 + 1e-6)
+                # Update priorities
+                self.replay_buffer.update_priorities([batch_idx], [loss])
+
+            # Soft update target_model based on the learned model
+            self.update_target_model([])
+
+            self._epoch_id += 1
 
 
 class PathBasedNN(NeuralNetworkBased):
@@ -324,7 +324,7 @@ class PathBasedNN(NeuralNetworkBased):
         state_embed = Dense(300, activation='elu', name='state_embed_2')(state_embed)
 
         # Get predicted Value Function
-        output = Dense(1, activation='relu', name='output')(state_embed)
+        output = Dense(1, name='output')(state_embed)
 
         model = Model(inputs=[path_location_input, delay_input, current_time_input, other_agents_input], outputs=output)
 
@@ -341,14 +341,14 @@ class PathBasedNN(NeuralNetworkBased):
         delay_order[0] = 1
 
         for idx, node in enumerate(agent.path.request_order):
-            if (idx >= 20):
+            if (idx >= 2 * self.envt.MAX_CAPACITY):
                 break
 
             location, deadline = agent.path.get_info(node)
             visit_time = node.expected_visit_time
 
             location_order[idx + 1] = location + 1
-            delay_order[idx + 1, 0] = (deadline - visit_time) / 600  # normalising by dividing by MAX_DELAY
+            delay_order[idx + 1, 0] = (deadline - visit_time) / Request.MAX_DROPOFF_DELAY  # normalising
 
         return location_order, delay_order, current_time_input
 
@@ -356,7 +356,8 @@ class PathBasedNN(NeuralNetworkBased):
         all_agents_other_agents_input = [0.0] * len(agents)
         for agent_idx, agent in enumerate(agents):
             for other_agent in agents:
-                if (self.envt.get_travel_time(agent.position.next_location, other_agent.position.next_location) < Request.MAX_PICKUP_DELAY):
+                if (self.envt.get_travel_time(agent.position.next_location, other_agent.position.next_location) < Request.MAX_PICKUP_DELAY or
+                        self.envt.get_travel_time(other_agent.position.next_location, agent.position.next_location) < Request.MAX_PICKUP_DELAY):
                     all_agents_other_agents_input[agent_idx] += 1
 
         return all_agents_other_agents_input

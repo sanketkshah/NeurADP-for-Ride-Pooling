@@ -19,7 +19,7 @@ class Environment(metaclass=ABCMeta):
 
     REQUEST_HISTORY_SIZE: int = 500
 
-    def __init__(self, NUM_LOCATIONS: int, MAX_CAPACITY: int, EPOCH_LENGTH: float, NUM_AGENTS: int, START_EPOCH: float, STOP_EPOCH: floatget_):
+    def __init__(self, NUM_LOCATIONS: int, MAX_CAPACITY: int, EPOCH_LENGTH: float, NUM_AGENTS: int, START_EPOCH: float, STOP_EPOCH: float):
         # Load environment
         self.NUM_LOCATIONS = NUM_LOCATIONS
         self.MAX_CAPACITY = MAX_CAPACITY
@@ -203,6 +203,7 @@ class NYEnvironment(Environment):
                           downsample: float=1) -> Generator[List[Request], None, None]:
 
         assert 0 < downsample <= 1
+        request_id = 0
 
         # Open file to read
         with open(self.DATA_FILE_PREFIX + str(day) + '.txt', 'r') as data_file:
@@ -243,7 +244,8 @@ class NYEnvironment(Environment):
                             destination = int(request_data.group(2))
                             if (source not in self.ignored_zones and destination not in self.ignored_zones and source != destination):
                                     travel_time = self.get_travel_time(source, destination)
-                                    request_list.append(Request(source, destination, self.current_time, travel_time))
+                                    request_list.append(Request(request_id, source, destination, self.current_time, travel_time))
+                                    request_id += 1
 
             if (current_hour >= start_hour and current_hour < end_hour):
                 yield request_list

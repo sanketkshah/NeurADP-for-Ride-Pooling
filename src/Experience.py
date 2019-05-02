@@ -2,7 +2,7 @@ from LearningAgent import LearningAgent
 from Action import Action
 from Environment import Environment
 
-from typing import List, Optional
+from typing import List, Optional, Dict, Any
 
 
 class Experience(object):
@@ -20,3 +20,5 @@ class Experience(object):
         assert self.envt is not None
         assert len(agents) == self.envt.NUM_AGENTS
         assert len(feasible_actions_all_agents) == self.envt.NUM_AGENTS
+
+        self.representation: Dict[str, Any] = {}

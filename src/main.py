@@ -106,7 +106,7 @@ def run_epoch(envt,
 
 
 if __name__ == '__main__':
-    pdb.set_trace()
+    # pdb.set_trace()
 
     # Parse command line arguments
     parser = argparse.ArgumentParser()

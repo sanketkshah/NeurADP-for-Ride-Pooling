@@ -8,6 +8,7 @@ from typing import List, Tuple, Optional, FrozenSet, Dict, Any, Set
 
 from copy import deepcopy
 from collections import namedtuple
+import heapq
 
 
 # TODO: Factor out template from implementation like in Environment
@@ -18,77 +19,86 @@ class Oracle(object):
         self.envt: NYEnvironment = envt
 
     def get_feasible_actions(self,
-                             agent: LearningAgent,
+                             agents: List[LearningAgent],
                              requests: List[Request],
                              MAX_ACTIONS: int = -1,
                              MAX_TRIPS_SIZE_1: int = 30,
-                             MAX_IS_FEASIBLE_CALLS: int = 150) -> List[Action]:
+                             MAX_IS_FEASIBLE_CALLS: int = 150) -> List[List[Action]]:
         """Get a list of the best feasible actions for each agent."""
 
-        trips: List[Action] = []
-        tested_actions: List = []
-        num_is_feasible_calls = 0
+        # Associate requests with closest MAX_TRIPS_SIZE_1 vehicles
+        def _distance_to_request(agent: LearningAgent, request: Request):
+            return self.envt.get_travel_time(agent.position.next_location, request.pickup) + agent.position.time_to_next_location
 
-        # Create null action
-        null_action = Action([])
-        null_action.new_path = agent.path
-        trips.append(null_action)
-
-        # Get feasible trips of size 1
-        # Order requests by pickup distance
-        distances_from_pickup = []
-        agent_location = agent.position.next_location
+        MAX_TRIPS_SIZE_1 = min(MAX_TRIPS_SIZE_1, len(agents))
+        requests_for_each_agent: List[List[Request]] = [[] for _ in range(len(agents))]
         for request_idx, request in enumerate(requests):
-            time_to_pickup = self.envt.get_travel_time(
-                agent_location, request.pickup)
-            distances_from_pickup.append((request_idx, time_to_pickup))
-        distances_from_pickup.sort(key=lambda x: x[1])
+            times_to_pickup = [(agent_idx, _distance_to_request(agent, request)) for agent_idx, agent in enumerate(agents)]
+            times_to_pickup.sort(key=lambda x: x[1])
+            for idx in range(MAX_TRIPS_SIZE_1):
+                agent_idx = times_to_pickup[idx][0]
+                requests_for_each_agent[agent_idx].append(request)
 
-        # Check feasibility for closest MAX_TRIPS_SIZE_1 requests
-        num_trips_size_1 = min(MAX_TRIPS_SIZE_1, len(requests))
-        for request_idx, _ in distances_from_pickup[:num_trips_size_1]:
-            action = Action([requests[request_idx]])
-            action.new_path = self.get_new_path(agent, agent.path, requests[request_idx])
+        # Get feasible trips for each vehicle
+        feasible_actions_all_agents = []
+        for requests_for_agent, agent in zip(requests_for_each_agent, agents):
+            trips: List[Action] = []
+            tested_actions: Set[Action] = set()
+            num_is_feasible_calls = 0
 
-            if action.new_path is not None:
-                trips.append(action)
+            # Create null action
+            null_action = Action([])
+            null_action.new_path = agent.path
+            trips.append(null_action)
 
-            num_is_feasible_calls += 1
-            tested_actions.append(action)
+            # Check feasibility for individual requests
+            for request in requests_for_agent:
+                action = Action([request])
+                action.new_path = self.get_new_path(agent, agent.path, request)
 
-        # Get feasible trips of size > 1, with a fixed budget
-        # TODO: Consider ordering new trips by symmetric difference to existing ones
-        trips_size_1 = list(range(1, len(trips)))  # not considering the null trip
-        nodes_to_expand = list(range(1, len(trips)))
+                if action.new_path is not None:
+                    trips.append(action)
 
-        while len(nodes_to_expand) > 0 and num_is_feasible_calls < MAX_IS_FEASIBLE_CALLS:
-            trip_idx = nodes_to_expand.pop()
-            action = trips[trip_idx]
-            for trip_size_1_idx in trips_size_1:
-                prev_requests = action.requests
-                new_requests = trips[trip_size_1_idx].requests
-                new_action = Action(prev_requests.union(new_requests))
+                num_is_feasible_calls += 1
+                tested_actions.add(action)
 
-                if (new_action not in tested_actions):
-                    # Hacky way to get request the only request from the frozenset requests
-                    new_request, = new_requests
-                    assert action.new_path is not None  # Make sure no invalid actions slipped past
-                    new_path = self.get_new_path(agent, action.new_path, new_request)
+            # Get feasible trips of size > 1, with a fixed budget of MAX_IS_FEASIBLE_CALLS
+            def trip_priority(trip: Action) -> float:
+                assert trip.new_path
+                return - trip.new_path.total_delay / len(trip.new_path.requests)
 
-                    if (new_path is not None):
-                        new_action.new_path = new_path
-                        trips.append(new_action)
-                        nodes_to_expand.append(len(trips) - 1)
+            trips_size_1 = list(range(1, len(trips)))  # not considering the null trip
+            nodes_to_expand = [(trip_priority(trip), trip_idx + 1) for trip_idx, trip in enumerate(trips[1:])]
+            heapq.heapify(nodes_to_expand)
+            while len(nodes_to_expand) > 0 and num_is_feasible_calls < MAX_IS_FEASIBLE_CALLS:
+                _, trip_idx = heapq.heappop(nodes_to_expand)
+                action = trips[trip_idx]
+                for trip_size_1_idx in trips_size_1:
+                    prev_requests = action.requests
+                    new_requests = trips[trip_size_1_idx].requests
+                    new_action = Action(prev_requests.union(new_requests))
 
-                    num_is_feasible_calls += 1
-                    tested_actions.append(new_action)
+                    if (new_action not in tested_actions):
+                        # Hacky way to get request the only request from the frozenset requests
+                        new_request, = new_requests
+                        assert action.new_path is not None  # Make sure no invalid actions slipped past
+                        new_path = self.get_new_path(agent, action.new_path, new_request)
 
-        # Select best MAX_ACTIONS actions
-        # TODO: Select 'best'. Currently selecting first MAX_ACTIONS actions.
-        if (MAX_ACTIONS >= 0 and len(trips) > MAX_ACTIONS):
-            trips = trips[:MAX_ACTIONS]
+                        if (new_path is not None):
+                            new_action.new_path = new_path
+                            trips.append(new_action)
+                            heapq.heappush(nodes_to_expand, (trip_priority(new_action), len(trips) - 1))
 
-        return trips
+                        num_is_feasible_calls += 1
+                        tested_actions.add(new_action)
+
+                # Create only MAX_ACTIONS actions
+                if (MAX_ACTIONS >= 0 and len(trips) >= MAX_ACTIONS):
+                    break
+
+            feasible_actions_all_agents.append(trips)
+
+        return feasible_actions_all_agents
 
     def get_new_path(self, agent: LearningAgent, current_path: Path, new_request: Request, SEARCH_THRESHOLD: int=-1) -> Optional[Path]:
         # Create new Path variable to return

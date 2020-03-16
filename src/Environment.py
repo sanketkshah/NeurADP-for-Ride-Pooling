@@ -17,9 +17,9 @@ from random import randint, random
 class Environment(metaclass=ABCMeta):
     """Defines a class for simulating the Environment for the RL agent"""
 
-    REQUEST_HISTORY_SIZE: int = 500
+    REQUEST_HISTORY_SIZE: int = 1000
 
-    def __init__(self, NUM_LOCATIONS: int, MAX_CAPACITY: int, EPOCH_LENGTH: float, NUM_AGENTS: int, START_EPOCH: float, STOP_EPOCH: float):
+    def __init__(self, NUM_LOCATIONS: int, MAX_CAPACITY: int, EPOCH_LENGTH: float, NUM_AGENTS: int, START_EPOCH: float, STOP_EPOCH: float, DATA_DIR: str):
         # Load environment
         self.NUM_LOCATIONS = NUM_LOCATIONS
         self.MAX_CAPACITY = MAX_CAPACITY
@@ -27,6 +27,7 @@ class Environment(metaclass=ABCMeta):
         self.NUM_AGENTS = NUM_AGENTS
         self.START_EPOCH = START_EPOCH
         self.STOP_EPOCH = STOP_EPOCH
+        self.DATA_DIR = DATA_DIR
 
         self.num_days_trained = 0
         self.recent_request_history: Deque[Request] = deque(maxlen=self.REQUEST_HISTORY_SIZE)
@@ -80,9 +81,11 @@ class Environment(metaclass=ABCMeta):
                 # Move according to dummy target
                 self._move_agent(agent, time_remaining)
 
-                # Delete dummy target
+                # Undo impact of creating dummy target
                 agent.path.request_order.clear()
                 agent.path.requests.clear()
+                agent.path.current_capacity = 0
+                agent.path.total_delay = 0
 
     def _move_agent(self, agent: LearningAgent, time_remaining: float) -> float:
         while(time_remaining >= 0):
@@ -112,7 +115,8 @@ class Environment(metaclass=ABCMeta):
     def _get_rebalance_targets(self, agents: List[LearningAgent]) -> List[Request]:
         # Get a list of possible targets by sampling from recent_requests
         possible_targets: List[Request] = []
-        for _ in range(len(agents)):
+        num_targets = min(500, len(agents))
+        for _ in range(num_targets):
             target = choice(self.recent_request_history)
             possible_targets.append(target)
 
@@ -122,13 +126,15 @@ class Environment(metaclass=ABCMeta):
         # Define variables, a matrix defining the assignment of agents to targets
         assignments = model.continuous_var_matrix(range(len(agents)), range(len(possible_targets)), name='assignments')
 
-        # Make sure one target can only be assigned to one agentfor m in matches
+        # Make sure one agent can only be assigned to one target
         for agent_id in range(len(agents)):
             model.add_constraint(model.sum(assignments[agent_id, target_id] for target_id in range(len(possible_targets))) == 1)
 
-        # Make sure one agent can only be assigned to one target
+        # Make sure one target can only be assigned to *ratio* agents
+        num_fractional_targets = len(agents) - (int(len(agents) / num_targets) * num_targets)
         for target_id in range(len(possible_targets)):
-            model.add_constraint(model.sum(assignments[agent_id, target_id] for agent_id in range(len(agents))) == 1)
+            num_agents_to_target = int(len(agents) / num_targets) + (1 if target_id < num_fractional_targets else 0)
+            model.add_constraint(model.sum(assignments[agent_id, target_id] for agent_id in range(len(agents))) == num_agents_to_target)
 
         # Define the objective: Minimise distance travelled
         model.minimize(model.sum(assignments[agent_id, target_id] * self.get_travel_time(agents[agent_id].position.next_location, possible_targets[target_id].pickup) for target_id in range(len(possible_targets)) for agent_id in range(len(agents))))
@@ -164,46 +170,41 @@ class Environment(metaclass=ABCMeta):
 class NYEnvironment(Environment):
     """Define an Environment using the cleaned NYC Yellow Cab dataset."""
 
-    NUM_MAX_AGENTS: int = 1000
+    NUM_MAX_AGENTS: int = 3000
     NUM_LOCATIONS: int = 4461
-    EPOCH_LENGTH: float = 60.0
 
-    DATA_DIR: str = '../data/'
-    TRAVELTIME_FILE: str = DATA_DIR + 'ny/zone_traveltime.csv'
-    SHORTESTPATH_FILE: str = DATA_DIR + 'ny/zone_path.csv'
-    INITIALZONES_FILE: str = DATA_DIR + 'ny/taxi_randominit_1000.txt'
-    IGNOREDZONES_FILE: str = DATA_DIR + 'ny/ignorezonelist.txt'
-    DATA_FILE_PREFIX: str = DATA_DIR + 'ny/test_flow_5000_'
-
-    def __init__(self, NUM_AGENTS: int, START_EPOCH: float, STOP_EPOCH: float, MAX_CAPACITY: int=10):
-        assert NUM_AGENTS <= self.NUM_MAX_AGENTS
-        super().__init__(NUM_LOCATIONS=self.NUM_LOCATIONS, MAX_CAPACITY=MAX_CAPACITY, EPOCH_LENGTH=self.EPOCH_LENGTH, NUM_AGENTS=NUM_AGENTS, START_EPOCH=START_EPOCH, STOP_EPOCH=STOP_EPOCH)
-
+    def __init__(self, NUM_AGENTS: int, START_EPOCH: float, STOP_EPOCH: float, MAX_CAPACITY, DATA_DIR: str='../data/ny/', EPOCH_LENGTH: float = 60.0):
+        super().__init__(NUM_LOCATIONS=self.NUM_LOCATIONS, MAX_CAPACITY=MAX_CAPACITY, EPOCH_LENGTH=EPOCH_LENGTH, NUM_AGENTS=NUM_AGENTS, START_EPOCH=START_EPOCH, STOP_EPOCH=STOP_EPOCH, DATA_DIR=DATA_DIR)
         self.initialise_environment()
 
     def initialise_environment(self):
         print('Loading Environment...')
 
-        self.travel_time = read_csv(self.TRAVELTIME_FILE,
-                                    header=None).values
+        TRAVELTIME_FILE: str = self.DATA_DIR + 'zone_traveltime.csv'
+        self.travel_time = read_csv(TRAVELTIME_FILE, header=None).values
 
-        self.shortest_path = read_csv(self.SHORTESTPATH_FILE,
-                                      header=None).values
+        SHORTESTPATH_FILE: str = self.DATA_DIR + 'zone_path.csv'
+        self.shortest_path = read_csv(SHORTESTPATH_FILE, header=None).values
 
-        self.ignored_zones = read_csv(self.IGNOREDZONES_FILE,
-                                      header=None).values.flatten()
+        IGNOREDZONES_FILE: str = self.DATA_DIR + 'ignorezonelist.txt'
+        self.ignored_zones = read_csv(IGNOREDZONES_FILE, header=None).values.flatten()
 
-        self.initial_zones = read_csv(self.INITIALZONES_FILE,
-                                      header=None).values.flatten()
+        INITIALZONES_FILE: str = self.DATA_DIR + 'taxi_3000_final.txt'
+        self.initial_zones = read_csv(INITIALZONES_FILE, header=None).values.flatten()
+
+        assert (self.EPOCH_LENGTH == 60) or (self.EPOCH_LENGTH == 30) or (self.EPOCH_LENGTH == 10)
+        self.DATA_FILE_PREFIX: str = "{}files_{}sec/test_flow_5000_".format(self.DATA_DIR, int(self.EPOCH_LENGTH))
 
     def get_request_batch(self,
-                          start_hour: int=0,
-                          end_hour: int=24,
                           day: int=2,
                           downsample: float=1) -> Generator[List[Request], None, None]:
 
         assert 0 < downsample <= 1
         request_id = 0
+
+        def is_in_time_range(current_time):
+            current_hour = int(current_time / 3600)
+            return True if (current_hour >= self.START_EPOCH / 3600 and current_hour < self.STOP_EPOCH / 3600) else False
 
         # Open file to read
         with open(self.DATA_FILE_PREFIX + str(day) + '.txt', 'r') as data_file:
@@ -222,15 +223,14 @@ class NYEnvironment(Environment):
                 is_new_epoch = re.match(new_epoch_re, line)
                 if (is_new_epoch is not None):
                     if not is_first_epoch:
-                        current_hour = int(self.current_time / 3600)
-                        if (current_hour >= start_hour and current_hour < end_hour):
+                        if is_in_time_range(self.current_time):
                             yield request_list
-
-                        current_epoch = int(is_new_epoch.group(1))
-                        self.current_time = current_epoch * self.EPOCH_LENGTH
                         request_list.clear()  # starting afresh for new batch
                     else:
                         is_first_epoch = False
+
+                    current_epoch = int(is_new_epoch.group(1))
+                    self.current_time = current_epoch * self.EPOCH_LENGTH
                 else:
                     request_data = re.match(request_re, line)
                     assert request_data is not None  # Make sure there's nothing funky going on with the formatting
@@ -247,7 +247,7 @@ class NYEnvironment(Environment):
                                     request_list.append(Request(request_id, source, destination, self.current_time, travel_time))
                                     request_id += 1
 
-            if (current_hour >= start_hour and current_hour < end_hour):
+            if is_in_time_range(self.current_time):
                 yield request_list
 
     def get_travel_time(self, source: int, destination: int) -> float:
@@ -258,7 +258,9 @@ class NYEnvironment(Environment):
 
     def get_initial_states(self, num_agents: int, is_training: bool) -> List[int]:
         """Give initial states for num_agents agents"""
-        assert (num_agents <= self.NUM_MAX_AGENTS)
+        if (num_agents > self.NUM_MAX_AGENTS):
+            print('Too many agents. Starting with random states.')
+            is_training = True
 
         # If it's training, get random states
         if is_training:
@@ -286,6 +288,10 @@ class NYEnvironment(Environment):
             print('Request Order -> {}'.format(agent.path.request_order))
             print()
             return False
+
+        # Make sure that its current capacity is sensible
+        if (agent.path.current_capacity < 0 or agent.path.current_capacity > self.MAX_CAPACITY):
+            return invalid_path_trace('Invalid current capacity')
 
         # Make sure that it visits all the requests that it has accepted
         if (not agent.path.is_complete()):

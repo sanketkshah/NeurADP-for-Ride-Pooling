@@ -45,7 +45,7 @@ class CentralAgent(object):
     def _additive_noise(self, agent_action_choices: List[List[Tuple[Action, float]]], is_training: bool=True, epoch_num: int=1) -> List[Tuple[Action, float]]:
         # Define noise function for exploration
         def get_noise(variable: Var) -> float:
-            stdev = (150000 if 'x0,' in variable.get_name() else 40000) / ((epoch_num + 10) * self.envt.NUM_AGENTS)
+            stdev = 1 + (4000 if 'x0,' in variable.get_name() else 1000) / ((epoch_num + 1) * self.envt.NUM_AGENTS)
             return abs(gauss(0, stdev)) if is_training else 0
 
         final_actions = self._choose_actions_ILP(agent_action_choices, get_noise=get_noise)

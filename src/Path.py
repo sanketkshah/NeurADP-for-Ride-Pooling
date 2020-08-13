@@ -35,7 +35,7 @@ class Path(object):
             else:
                 return relevant_request.request.pickup
 
-    def visit_next_location(self):
+    def visit_next_location(self, current_time):
         if not self.is_empty():
             next_node = self.request_order.pop(0)
             relevant_request_id = next_node.relevant_request_id
@@ -49,15 +49,23 @@ class Path(object):
                 for node in self.request_order:
                     if (node.relevant_request_id > relevant_request_id):
                         node.relevant_request_id -= 1
+
+                # Make sure that the dropoff deadline was met
+                if not next_request.is_dummy:
+                    assert next_request.request.dropoff_deadline >= current_time
             else:
                 self.requests[relevant_request_id].has_been_picked_up = True
+
+                # Make sure that the pickup deadline was met
+                if not self.requests[relevant_request_id].is_dummy:
+                    assert self.requests[relevant_request_id].request.pickup_deadline >= current_time
 
             self.current_capacity = next_node.current_capacity
 
     def is_empty(self) -> bool:
         return False if self.request_order else True
 
-    def is_complete(self, request_order: List['PathNode']=None) -> bool:
+    def is_complete(self, request_order: List['PathNode'] = None) -> bool:
         # Count number of locations to visit
         num_locations_to_visit = 0
         for request in self.requests:
@@ -92,10 +100,12 @@ class RequestInfo(object):
 
     def __init__(self,
                  request: Request,
-                 has_been_picked_up: bool) -> None:
+                 has_been_picked_up: bool,
+                 is_dummy: bool) -> None:
 
         self.request = request
         self.has_been_picked_up = has_been_picked_up
+        self.is_dummy = is_dummy
 
     def __str__(self):
         return "({}, {})".format(self.request, self.has_been_picked_up)

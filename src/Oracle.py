@@ -105,7 +105,7 @@ class Oracle(object):
         new_path = deepcopy(current_path)
 
         # Add new_request to new_path
-        new_request_info = RequestInfo(new_request, False)
+        new_request_info = RequestInfo(new_request, False, False)
         new_path.requests.append(new_request_info)
 
         # Find a way to fulfill these requests

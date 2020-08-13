@@ -75,7 +75,7 @@ class Environment(metaclass=ABCMeta):
                 agent, time_remaining = agents_to_rebalance[idx]
 
                 # Insert dummy target
-                agent.path.requests.append(RequestInfo(target, False))
+                agent.path.requests.append(RequestInfo(target, False, True))
                 agent.path.request_order.append(PathNode(False, 0))  # adds pickup location to 'to-visit' list
 
                 # Move according to dummy target
@@ -95,7 +95,7 @@ class Environment(metaclass=ABCMeta):
             if (time_remaining >= 0):
                 # If the intersection is an existing pick-up or drop-off location, update the Agent's path
                 if (agent.position.next_location == agent.path.get_next_location()):
-                    agent.path.visit_next_location()
+                    agent.path.visit_next_location(self.current_time + self.EPOCH_LENGTH - time_remaining)
 
                 # Go to the next location in the path, if it exists
                 if (not agent.path.is_empty()):
@@ -105,6 +105,7 @@ class Environment(metaclass=ABCMeta):
 
                 # If no additional locations need to be visited, stop
                 else:
+                    veh.position.time_to_next_location = 0
                     break
             # Else, continue down the road you're on
             else:

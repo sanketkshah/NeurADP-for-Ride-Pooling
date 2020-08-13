@@ -105,7 +105,7 @@ class Environment(metaclass=ABCMeta):
 
                 # If no additional locations need to be visited, stop
                 else:
-                    veh.position.time_to_next_location = 0
+                    agent.position.time_to_next_location = 0
                     break
             # Else, continue down the road you're on
             else:

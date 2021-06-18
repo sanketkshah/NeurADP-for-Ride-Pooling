@@ -403,7 +403,7 @@ class PathBasedNN(NeuralNetworkBased):
                 # Get formatted output for the state
                 location_order, delay_order, current_time_scaled, num_requests_scaled, num_other_agents_scaled = self._format_input(agent, current_time, num_requests, num_other_agents)
 
-                current_time_input.append(num_requests_scaled)
+                current_time_input.append(current_time_scaled)
                 num_requests_input.append(num_requests)
                 path_location_input.append(location_order)
                 delay_input.append(delay_order)
